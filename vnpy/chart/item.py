@@ -141,6 +141,19 @@ class ChartItem(pg.GraphicsObject):
         self._item_picuture = QtGui.QPicture()
         painter: QtGui.QPainter = QtGui.QPainter(self._item_picuture)
 
+        # pg.setConfigOptions(antialias=True) in widget.py only feeds
+        # pyqtgraph's OWN item classes (they read the config option and
+        # call setRenderHint themselves, e.g. PlotCurveItem.paint) — these
+        # custom GraphicsObjects paint through their own QPainter and got
+        # no antialiasing anywhere in the chain, so candle wicks/bodies
+        # and volume bars rendered as raw aliased 1px cosmetic-pen lines
+        # (visibly jagged on hi-dpi displays). Setting the hint here, on
+        # the picture-recording painter, covers both CandleItem and
+        # VolumeItem: it is recorded into _item_picuture and replayed
+        # onto the screen painter. Cost is bounded — pictures are cached
+        # per bar and only re-rasterized when a bar actually changes.
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
         for ix in range(min_ix, max_ix):
             bar_picture: QtGui.QPicture | None = self._bar_picutures[ix]
 
