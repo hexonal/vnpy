@@ -60,11 +60,17 @@ class BacktestingEngine:
         self.logs: list[str] = []
 
         self.daily_results: dict[date, PortfolioDailyResult] = {}
-        self.daily_df: pl.DataFrame
+        # Real assignment, not a bare annotation: calculate_result()
+        # returns early (without assigning) when there are zero trades,
+        # and calculate_statistics() reads this attribute — a bare
+        # annotation made that path an AttributeError instead of hitting
+        # the `if df is not None` guard that already exists downstream.
+        self.daily_df: pl.DataFrame | None = None
 
         self.pre_closes: defaultdict = defaultdict(float)
 
         self.cash: float = 0
+        self.slippage_rate: float = 0
         self.signal_df: pl.DataFrame
 
     def set_parameters(
@@ -75,9 +81,18 @@ class BacktestingEngine:
         end: datetime,
         capital: int = 1_000_000,
         risk_free: float = 0,
-        annual_days: int = 240
+        annual_days: int = 240,
+        slippage_rate: float = 0
     ) -> None:
-        """Set parameters"""
+        """Set parameters
+
+        slippage_rate: proportional price slippage applied per fill
+        (buys fill higher, sells fill lower by this fraction). The
+        default 0 preserves the engine's historical behavior, but note
+        that behavior means fills at the exact next-bar open with zero
+        market impact and unlimited liquidity — a top-k rotation
+        backtest run with 0 here overstates achievable returns.
+        """
         self.vt_symbols = vt_symbols
         self.interval = interval
 
@@ -86,6 +101,7 @@ class BacktestingEngine:
         self.capital = capital
         self.risk_free = risk_free
         self.annual_days = annual_days
+        self.slippage_rate = slippage_rate
 
         self.cash = capital
 
@@ -330,7 +346,13 @@ class BacktestingEngine:
             else:
                 sharpe_ratio = 0
 
-            return_drawdown_ratio = -total_net_pnl / max_drawdown
+            # Guarded like the return_std==0 branch above: a run whose
+            # balance never dips below its high-water mark has
+            # max_drawdown == 0.0, and float division by 0.0 raises too.
+            if max_drawdown:
+                return_drawdown_ratio = -total_net_pnl / max_drawdown
+            else:
+                return_drawdown_ratio = 0
 
         # Output results
         logger.info("-" * 30)
@@ -631,12 +653,20 @@ class BacktestingEngine:
                 order.status = Status.NOTTRADED
                 self.strategy.update_order(order)
 
-            # Calculate price limits
+            # Calculate price limits — the ±10% band is a mainland
+            # A-share circuit-breaker convention. HKEX (and US) have no
+            # daily price limits: applying the band there spuriously
+            # blocks fills on any instrument that legitimately moves
+            # >10% intraday (2x leveraged ETPs like 7709 routinely do).
             pricetick: float = self.priceticks[order.vt_symbol]
             pre_close: float = self.pre_closes.get(order.vt_symbol, 0)
 
-            limit_up: float = round_to(pre_close * 1.1, pricetick)
-            limit_down: float = round_to(pre_close * 0.9, pricetick)
+            if order.vt_symbol.endswith((".SSE", ".SZSE")):
+                limit_up: float = round_to(pre_close * 1.1, pricetick)
+                limit_down: float = round_to(pre_close * 0.9, pricetick)
+            else:
+                limit_up = float("inf")
+                limit_down = float("-inf")
 
             # Check limit orders that can be matched
             long_cross: bool = (
@@ -669,8 +699,10 @@ class BacktestingEngine:
 
             if long_cross:
                 trade_price = min(order.price, long_best_price)
+                trade_price *= 1 + self.slippage_rate
             else:
                 trade_price = max(order.price, short_best_price)
+                trade_price *= 1 - self.slippage_rate
 
             trade: TradeData = TradeData(
                 symbol=order.symbol,

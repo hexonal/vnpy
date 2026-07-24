@@ -197,24 +197,33 @@ class AlphaLab:
             # Filter by date range
             df = df.filter((pl.col("datetime") >= start) & (pl.col("datetime") <= end))
 
-            # Specify data types
-            df = df.with_columns(
-                pl.col("open"),
-                pl.col("high"),
-                pl.col("low"),
-                pl.col("close"),
-                pl.col("volume"),
-                pl.col("turnover"),
-                pl.col("open_interest"),
-                (pl.col("turnover") / pl.col("volume")).alias("vwap")
-            )
-
             # Check for empty data
             if df.is_empty():
                 continue
 
-            # Normalize prices
-            close_0: float = df.select(pl.col("close")).item(0, 0)
+            # Detect suspended days from the RAW columns, BEFORE vwap is
+            # computed: vwap = turnover/volume is NaN (0/0) exactly on
+            # suspended days, and NaN poisons sum_horizontal (NaN == 0 is
+            # False), so the old mask — computed after vwap — never fired.
+            # Suspended days then kept a literal close = 0.0, which both
+            # blew up every close-denominator factor (x/0 -> inf) and,
+            # unlike a true NaN, was NOT skipped by nanmean/nanstd rolling
+            # windows (a real 0.0 dragged ts_mean/ts_std for the following
+            # window-1 days).
+            raw_numeric: list = ["open", "high", "low", "close", "volume", "turnover", "open_interest"]
+            mask: pl.Series = df[raw_numeric].sum_horizontal() == 0
+
+            df = df.with_columns(
+                (pl.col("turnover") / pl.col("volume")).alias("vwap")
+            )
+
+            # Normalize prices against the first NON-suspended close: if
+            # row 0 itself is a suspended zero-price day, dividing by
+            # close_0 = 0 turns the entire symbol's price series into inf.
+            nonzero_close: pl.DataFrame = df.filter(pl.col("close") != 0).select(pl.col("close"))
+            if nonzero_close.is_empty():
+                continue
+            close_0: float = nonzero_close.item(0, 0)
 
             df = df.with_columns(
                 (pl.col("open") / close_0).alias("open"),
@@ -223,12 +232,10 @@ class AlphaLab:
                 (pl.col("close") / close_0).alias("close"),
             )
 
-            # Convert zeros to NaN for suspended trading days
-            numeric_columns: list = df.columns[1:]                              # Extract numeric columns
+            # Convert suspended day values (incl. the NaN vwap) to NaN
+            numeric_columns: list = df.columns[1:]
 
-            mask: pl.Series = df[numeric_columns].sum_horizontal() == 0         # Sum by row, if 0 then suspended
-
-            df = df.with_columns(                                               # Convert suspended day values to NaN
+            df = df.with_columns(
                 [pl.when(mask).then(float("nan")).otherwise(pl.col(col)).alias(col) for col in numeric_columns]
             )
 

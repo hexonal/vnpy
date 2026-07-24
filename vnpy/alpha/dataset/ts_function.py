@@ -225,7 +225,7 @@ def ts_resi(feature: DataProxy, window: int) -> DataProxy:
 
 def ts_corr(feature1: DataProxy, feature2: DataProxy, window: int) -> DataProxy:
     """Calculate the correlation between two features over a rolling window"""
-    df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"])
+    df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left")
 
     df: pl.DataFrame = df_merged.select(
         pl.col("datetime"),
@@ -243,7 +243,7 @@ def ts_corr(feature1: DataProxy, feature2: DataProxy, window: int) -> DataProxy:
 def ts_less(feature1: DataProxy, feature2: DataProxy | float) -> DataProxy:
     """Return the minimum value between two features"""
     if isinstance(feature2, DataProxy):
-        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"])
+        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left")
     else:
         df_merged = feature1.df.with_columns(pl.lit(feature2).alias("data_right"))
 
@@ -259,7 +259,7 @@ def ts_less(feature1: DataProxy, feature2: DataProxy | float) -> DataProxy:
 def ts_greater(feature1: DataProxy, feature2: DataProxy | float) -> DataProxy:
     """Return the maximum value between two features"""
     if isinstance(feature2, DataProxy):
-        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"])
+        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left")
 
     else:
         df_merged = feature1.df.with_columns(pl.lit(feature2).alias("data_right"))

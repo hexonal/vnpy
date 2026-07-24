@@ -35,10 +35,19 @@ class AlphaStrategy(metaclass=ABCMeta):
         self.orders: dict[str, OrderData] = {}
         self.active_orderids: set[str] = set()
 
-        # Set strategy parameters
+        # Set strategy parameters — unknown keys fail fast instead of
+        # being silently dropped: a typo'd/renamed setting key (e.g.
+        # passing qlib-style "hold_thresh" to a strategy whose attribute
+        # is "min_days") previously left the intended parameter at its
+        # class default with zero warning, producing a backtest that
+        # LOOKS like it ran the requested config but didn't.
         for k, v in setting.items():
-            if hasattr(self, k):
-                setattr(self, k, v)
+            if not hasattr(self, k):
+                raise ValueError(
+                    f"策略 {type(self).__name__} 没有名为 {k!r} 的参数"
+                    f"(setting 中的未知键会被静默忽略曾导致回测跑错配置,现改为显式报错)"
+                )
+            setattr(self, k, v)
 
     @abstractmethod
     def on_init(self) -> None:

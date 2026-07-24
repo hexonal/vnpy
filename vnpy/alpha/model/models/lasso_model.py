@@ -46,12 +46,13 @@ class LassoModel(AlphaModel):
         dataset : AlphaDataset
             The dataset used for training
         """
-        # Get training data
+        # Get training data — TRAIN only, matching LgbModel/MlpModel.
+        # Previously this concatenated TRAIN+VALID and fit on the union,
+        # which made any VALID-segment metric for Lasso in-sample while
+        # the other two models' VALID metrics are genuinely held-out —
+        # an apples-to-oranges model comparison inside one framework.
+        # VALID stays available for hyperparameter selection by callers.
         df_train: pl.DataFrame = dataset.fetch_learn(Segment.TRAIN)
-        df_valid: pl.DataFrame = dataset.fetch_learn(Segment.VALID)
-
-        # Merge data, remove duplicates and sort
-        df_train = pl.concat([df_train, df_valid])
         df_train = df_train.unique(subset=["datetime", "vt_symbol"])
         df_train = df_train.sort(["datetime", "vt_symbol"])
 

@@ -104,13 +104,27 @@ def process_ts_norm(
     fit_start_time: datetime | str | None = None,
     fit_end_time: datetime | str | None = None
 ) -> pl.DataFrame:
-    """Time-series normalization"""
+    """Time-series normalization.
+
+    fit_start_time/fit_end_time are effectively REQUIRED: this processor
+    runs on the combined train+valid+test frame (before segment slicing),
+    so fitting mean/std on the whole frame is silent test-set leakage.
+    Omitting the fit window now raises instead of quietly leaking —
+    time-series statistics, unlike the per-datetime cross-sectional
+    processors in this module, are not leakage-free by construction.
+    """
+    if not (fit_start_time and fit_end_time):
+        raise ValueError(
+            "process_ts_norm 必须显式传入 fit_start_time/fit_end_time"
+            "(通常 = 训练段起止):缺省时会在 train+valid+test 全集上"
+            "拟合均值/方差,构成测试集信息泄漏"
+        )
+
     _df: pl.DataFrame = df.fill_nan(None)
 
-    if fit_start_time and fit_end_time:
-        fit_start_time = to_datetime(fit_start_time)
-        fit_end_time = to_datetime(fit_end_time)
-        _df = _df.filter((pl.col("datetime") >= fit_start_time) & (pl.col("datetime") <= fit_end_time))
+    fit_start_time = to_datetime(fit_start_time)
+    fit_end_time = to_datetime(fit_end_time)
+    _df = _df.filter((pl.col("datetime") >= fit_start_time) & (pl.col("datetime") <= fit_end_time))
 
     for name in df.columns[2:]:
         df = df.with_columns(
@@ -156,13 +170,26 @@ def process_robust_zscore_norm(
     fit_end_time: datetime | str | None = None,
     clip_outlier: bool = True
 ) -> pl.DataFrame:
-    """Robust Z-Score normalization"""
+    """Robust Z-Score normalization.
+
+    fit_start_time/fit_end_time effectively REQUIRED — same leakage
+    rationale as process_ts_norm above (median/MAD fit on the combined
+    train+valid+test frame is test-set leakage). The shipped notebooks
+    already pass the train period explicitly; this makes that the only
+    accepted usage instead of the path of least resistance being leaky.
+    """
+    if not (fit_start_time and fit_end_time):
+        raise ValueError(
+            "process_robust_zscore_norm 必须显式传入 fit_start_time/"
+            "fit_end_time(通常 = 训练段起止):缺省时会在 train+valid+"
+            "test 全集上拟合 median/MAD,构成测试集信息泄漏"
+        )
+
     _df: pl.DataFrame = df.fill_nan(None)
 
-    if fit_start_time and fit_end_time:
-        fit_start_time = to_datetime(fit_start_time)
-        fit_end_time = to_datetime(fit_end_time)
-        _df = _df.filter((pl.col("datetime") >= fit_start_time) & (pl.col("datetime") <= fit_end_time))
+    fit_start_time = to_datetime(fit_start_time)
+    fit_end_time = to_datetime(fit_end_time)
+    _df = _df.filter((pl.col("datetime") >= fit_start_time) & (pl.col("datetime") <= fit_end_time))
 
     cols = df.columns[2:-1]
     X = _df.select(cols).to_numpy()

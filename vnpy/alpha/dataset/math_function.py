@@ -10,7 +10,7 @@ from .utility import DataProxy
 def less(feature1: DataProxy, feature2: DataProxy | float) -> DataProxy:
     """Return the minimum value between two features"""
     if isinstance(feature2, DataProxy):
-        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"])
+        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left")
     else:
         df_merged = feature1.df.with_columns(pl.lit(feature2).alias("data_right"))
 
@@ -26,7 +26,7 @@ def less(feature1: DataProxy, feature2: DataProxy | float) -> DataProxy:
 def greater(feature1: DataProxy, feature2: DataProxy | float) -> DataProxy:
     """Return the maximum value between two features"""
     if isinstance(feature2, DataProxy):
-        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"])
+        df_merged: pl.DataFrame = feature1.df.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left")
 
     else:
         df_merged = feature1.df.with_columns(pl.lit(feature2).alias("data_right"))
@@ -75,12 +75,12 @@ def quesval(threshold: float, feature1: DataProxy, feature2: DataProxy | float |
     df_merged = feature1.df
 
     if isinstance(feature2, DataProxy):
-        df_merged = df_merged.join(feature2.df, on=["datetime", "vt_symbol"], suffix="_true")
+        df_merged = df_merged.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left", suffix="_true")
     else:
         df_merged = df_merged.with_columns(pl.lit(feature2).alias("data_true"))
 
     if isinstance(feature3, DataProxy):
-        df_merged = df_merged.join(feature3.df, on=["datetime", "vt_symbol"], suffix="_false")
+        df_merged = df_merged.join(feature3.df, on=["datetime", "vt_symbol"], maintain_order="left", suffix="_false")
     else:
         df_merged = df_merged.with_columns(pl.lit(feature3).alias("data_false"))
 
@@ -96,15 +96,15 @@ def quesval(threshold: float, feature1: DataProxy, feature2: DataProxy | float |
 
 def quesval2(threshold: DataProxy, feature1: DataProxy, feature2: DataProxy | float | int, feature3: DataProxy | float | int) -> DataProxy:
     """Return feature2 if threshold < feature1, otherwise feature3 (DataProxy threshold version)"""
-    df_merged: pl.DataFrame = threshold.df.join(feature1.df, on=["datetime", "vt_symbol"], suffix="_cond")
+    df_merged: pl.DataFrame = threshold.df.join(feature1.df, on=["datetime", "vt_symbol"], maintain_order="left", suffix="_cond")
 
     if isinstance(feature2, DataProxy):
-        df_merged = df_merged.join(feature2.df, on=["datetime", "vt_symbol"], suffix="_true")
+        df_merged = df_merged.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left", suffix="_true")
     else:
         df_merged = df_merged.with_columns(pl.lit(feature2).alias("data_true"))
 
     if isinstance(feature3, DataProxy):
-        df_merged = df_merged.join(feature3.df, on=["datetime", "vt_symbol"], suffix="_false")
+        df_merged = df_merged.join(feature3.df, on=["datetime", "vt_symbol"], maintain_order="left", suffix="_false")
     else:
         df_merged = df_merged.with_columns(pl.lit(feature3).alias("data_false"))
 
@@ -145,7 +145,7 @@ def pow2(base: DataProxy, exponent: DataProxy) -> DataProxy:
     base_renamed = base.df.rename({"data": "base_data"})
     exp_renamed = exponent.df.rename({"data": "exp_data"})
 
-    df_merged: pl.DataFrame = base_renamed.join(exp_renamed, on=["datetime", "vt_symbol"], how="left")
+    df_merged: pl.DataFrame = base_renamed.join(exp_renamed, on=["datetime", "vt_symbol"], maintain_order="left", how="left")
 
     df: pl.DataFrame = df_merged.with_columns(
         pl.when(pl.col("base_data") > 0)

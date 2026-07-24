@@ -295,9 +295,27 @@ def calculate_feature(args: tuple[pl.DataFrame, str, str | pl.expr.expr.Expr]) -
     df, name, expression = args
 
     if isinstance(expression, pl.expr.expr.Expr):
-        result = calculate_by_polars(df, expression)["data"].alias(name)
+        result_df = calculate_by_polars(df, expression)
     else:
-        result = calculate_by_expression(df, expression)["data"].alias(name)
+        result_df = calculate_by_expression(df, expression)
+
+    # Alignment guard: prepare_data() attaches this result to self.df purely
+    # by ROW POSITION (with_columns), and DataProxy's binary operators also
+    # combine operands positionally — so any operator that reorders rows
+    # (historically: the key-joins inside ts_corr/ts_less/ts_greater/pow2/
+    # quesval*, which ran without maintain_order and therefore had
+    # unspecified output order per polars' own docs) silently glued factor
+    # values onto the wrong (datetime, vt_symbol). Those joins now pass
+    # maintain_order="left"; this re-join is the belt-and-braces layer that
+    # keeps a future order-scrambling operator from reintroducing the same
+    # silent corruption at the final attach step.
+    aligned = df.select(["datetime", "vt_symbol"]).join(
+        result_df.select(["datetime", "vt_symbol", "data"]),
+        on=["datetime", "vt_symbol"],
+        how="left",
+        maintain_order="left",
+    )
+    result = aligned["data"].alias(name)
 
     end = time.time()
     print(f"Feature calculation {name} took: {end - start} seconds | {expression}")

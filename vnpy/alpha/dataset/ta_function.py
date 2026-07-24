@@ -22,22 +22,48 @@ def to_pl_dataframe(series: pd.Series) -> pl.DataFrame:
 
 
 def ta_rsi(close: DataProxy, window: int) -> DataProxy:
-    """Calculate RSI indicator by contract"""
+    """Calculate RSI indicator by contract.
+
+    Grouped per vt_symbol — TA-Lib functions are single-series rolling
+    computations; running them over the whole concatenated multi-symbol
+    panel (as this previously did) blends the tail of one symbol into the
+    head of the next at every symbol boundary, corrupting the first
+    window-1 rows of every symbol after the first. Every other operator
+    in this package (ts_function/cs_function) already isolates per symbol
+    via .over("vt_symbol"); TA-Lib can't be driven by a polars window
+    expression, so the isolation here is an explicit per-group map.
+    """
     close_: pd.Series = to_pd_series(close)
 
-    result: pd.Series = talib.RSI(close_, timeperiod=window)   # type: ignore
+    result: pd.Series = close_.groupby(level="vt_symbol", sort=False).transform(
+        lambda s: talib.RSI(s, timeperiod=window)   # type: ignore
+    )
 
     df: pl.DataFrame = to_pl_dataframe(result)
     return DataProxy(df)
 
 
 def ta_atr(high: DataProxy, low: DataProxy, close: DataProxy, window: int) -> DataProxy:
-    """Calculate ATR indicator by contract"""
+    """Calculate ATR indicator by contract (per-symbol — see ta_rsi)."""
     high_: pd.Series = to_pd_series(high)
     low_: pd.Series = to_pd_series(low)
     close_: pd.Series = to_pd_series(close)
 
-    result: pd.Series = talib.ATR(high_, low_, close_, timeperiod=window)   # type: ignore
+    parts: list[pd.Series] = []
+    for symbol in close_.index.get_level_values("vt_symbol").unique():
+        h = high_.xs(symbol, level="vt_symbol", drop_level=False)
+        low_s = low_.xs(symbol, level="vt_symbol", drop_level=False)
+        c = close_.xs(symbol, level="vt_symbol", drop_level=False)
+        atr = talib.ATR(   # type: ignore
+            h.droplevel("vt_symbol"),
+            low_s.droplevel("vt_symbol"),
+            c.droplevel("vt_symbol"),
+            timeperiod=window,
+        )
+        atr.index = c.index
+        parts.append(atr)
+
+    result: pd.Series = pd.concat(parts).reindex(close_.index)
 
     df: pl.DataFrame = to_pl_dataframe(result)
     return DataProxy(df)

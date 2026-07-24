@@ -16,7 +16,12 @@ class EquityDemoStrategy(AlphaStrategy):
     n_drop: int = 5                 # Number of stocks to sell each time
     min_days: int = 3               # Minimum holding period in days
     cash_ratio: float = 0.95        # Cash utilization ratio
-    min_volume: int = 100           # Minimum trading unit
+    min_volume: int = 100           # Minimum trading unit (fallback lot size)
+    board_lots: dict | None = None  # Per-vt_symbol board lot overrides — HKEX
+                                    # lots vary per stock (100/200/400/500/...),
+                                    # a single min_volume constant produces
+                                    # share counts that are not executable
+                                    # on the real board-lot market
     open_rate: float = 0.0005       # Opening commission rate
     close_rate: float = 0.0015      # Closing commission rate
     min_commission: int = 5         # Minimum commission value
@@ -39,7 +44,23 @@ class EquityDemoStrategy(AlphaStrategy):
         """K-line slice callback"""
         # Get the latest signals and sort them
         last_signal: pl.DataFrame = self.get_signal()
-        last_signal = last_signal.sort("signal", descending=True)
+
+        # A missing signal batch for this date (calendar gap, timezone
+        # mismatch, upstream data hole) is a DATA problem, not "every
+        # holding dropped out of the investable universe" — without this
+        # guard, component_symbols below becomes the empty set and the
+        # strategy force-liquidates the ENTIRE book on a plumbing gap.
+        if last_signal.is_empty():
+            self.write_log("当日无信号数据,保持现有持仓不动")
+            return
+
+        # Deterministic ordering: polars sort makes no tie-order guarantee,
+        # so two symbols with exactly equal signal values could flip across
+        # the top_k/n_drop boundary between reruns of identical code+data.
+        # vt_symbol as secondary key makes the ordering a total order.
+        last_signal = last_signal.sort(
+            ["signal", "vt_symbol"], descending=[True, False]
+        )
 
         # Get position symbols and update holding days
         pos_symbols: list[str] = [vt_symbol for vt_symbol, pos in self.pos_data.items() if pos]
@@ -80,20 +101,34 @@ class EquityDemoStrategy(AlphaStrategy):
 
             self.set_target(vt_symbol, target=0)                    # Set target volume to 0
 
-            turnover: float = sell_price * sell_volume                                  # Calculate selling turnover
-            cost: float = max(turnover * self.close_rate, self.min_commission)          # Calculate selling cost
-            cash += turnover - cost                                                     # Update available cash
+            turnover: float = sell_price * sell_volume              # Calculate selling turnover
+            # Use the rate the ENGINE will actually charge for this
+            # symbol, not this class's decorative close_rate default —
+            # the two were previously unconnected, so the cash budget
+            # here could diverge from real post-settlement cash.
+            engine_rate: float = self.strategy_engine.short_rates.get(vt_symbol, self.close_rate)
+            cost: float = max(turnover * engine_rate, self.min_commission)
+            cash += turnover - cost                                 # Update available cash
 
         # Buy rebalancing
         if buy_symbols:
             buy_value: float = cash * self.cash_ratio / len(buy_symbols)        # Calculate investment amount per contract
 
             for vt_symbol in buy_symbols:
-                buy_price: float = bars[vt_symbol].close_price                  # Get current price of the contract
+                # A symbol can carry a signal for a date it has no bar on
+                # (suspension / data hole): bars[vt_symbol] raised KeyError
+                # here, and run_backtesting()'s broad except then silently
+                # truncated the whole backtest at that date while still
+                # printing full-looking statistics for the partial period.
+                buy_bar: BarData | None = bars.get(vt_symbol)
+                if not buy_bar:
+                    continue
+                buy_price: float = buy_bar.close_price                          # Get current price of the contract
                 if not buy_price:
                     continue
 
-                buy_volume: float = round_to(buy_value / buy_price, self.min_volume)    # Calculate volume to buy
+                lot: int = (self.board_lots or {}).get(vt_symbol, self.min_volume)
+                buy_volume: float = round_to(buy_value / buy_price, lot)        # Calculate volume to buy
 
                 self.set_target(vt_symbol, buy_volume)                          # Set target holding volume
 

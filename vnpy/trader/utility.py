@@ -251,11 +251,22 @@ class BarGenerator:
             self.bar.datetime = tick.datetime
 
         if self.last_tick and self.bar:
-            volume_change: float = tick.volume - self.last_tick.volume
-            self.bar.volume += max(volume_change, 0)
+            if tick.datetime.date() != self.last_tick.datetime.date():
+                # Session rollover: tick.volume/turnover are cumulative
+                # per session and reset at the new day's open. The delta
+                # against yesterday's full-day total is hugely negative,
+                # and the max(...,0) floor below silently reported ~0
+                # volume for the first bar of EVERY session — biasing any
+                # volume-based signal exactly at the open. On rollover the
+                # new session's cumulative-so-far IS this bar's volume.
+                self.bar.volume += tick.volume
+                self.bar.turnover += tick.turnover
+            else:
+                volume_change: float = tick.volume - self.last_tick.volume
+                self.bar.volume += max(volume_change, 0)
 
-            turnover_change: float = tick.turnover - self.last_tick.turnover
-            self.bar.turnover += max(turnover_change, 0)
+                turnover_change: float = tick.turnover - self.last_tick.turnover
+                self.bar.turnover += max(turnover_change, 0)
 
         self.last_tick = tick
 
@@ -272,6 +283,32 @@ class BarGenerator:
 
     def update_bar_minute_window(self, bar: BarData) -> None:
         """"""
+        # Flush a stale partial window before starting a new one: the
+        # modulo check at the bottom is the ONLY emit path, so any window
+        # whose closing minute never arrives (trading halt, data-feed
+        # gap, session ending off-alignment — e.g. HK half-days) used to
+        # leave window_bar accumulating silently into the next session,
+        # merging bars across the gap. If the incoming bar belongs to a
+        # different window slot than the one being built, close the old
+        # slot first. (The hour-window path below always had exactly this
+        # flush-on-discontinuity branch; the minute path was asymmetric.)
+        if self.window_bar:
+            current_slot: datetime = self.window_bar.datetime.replace(
+                minute=self.window_bar.datetime.minute
+                - self.window_bar.datetime.minute % self.window,
+                second=0,
+                microsecond=0,
+            )
+            new_slot: datetime = bar.datetime.replace(
+                minute=bar.datetime.minute - bar.datetime.minute % self.window,
+                second=0,
+                microsecond=0,
+            )
+            if new_slot != current_slot:
+                if self.on_window_bar:
+                    self.on_window_bar(self.window_bar)
+                self.window_bar = None
+
         # If not inited, create window bar object
         if not self.window_bar:
             dt: datetime = bar.datetime.replace(second=0, microsecond=0)
@@ -429,6 +466,21 @@ class BarGenerator:
 
     def update_bar_daily_window(self, bar: BarData) -> None:
         """"""
+        # Date-rollover flush: the completion check at the bottom used to
+        # be exact-time equality against daily_end, so any session that
+        # never produced a bar stamped exactly daily_end (HK half-days
+        # close at 12:00, data gaps, timestamp jitter) silently merged
+        # that whole day into the next one — wrong high/low, doubled
+        # volume, stamped with the later date. A bar from a NEW calendar
+        # date closes out the previous day's accumulation first.
+        if self.daily_bar and bar.datetime.date() != self.daily_bar.datetime.date():
+            self.daily_bar.datetime = self.daily_bar.datetime.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            if self.on_window_bar:
+                self.on_window_bar(self.daily_bar)
+            self.daily_bar = None
+
         # If not inited, create daily bar object
         if not self.daily_bar:
             self.daily_bar = BarData(
@@ -457,8 +509,10 @@ class BarGenerator:
         self.daily_bar.turnover += bar.turnover
         self.daily_bar.open_interest = bar.open_interest
 
-        # Check if daily bar completed
-        if bar.datetime.time() == self.daily_end:
+        # Check if daily bar completed (>=, not ==: an early close or a
+        # missing bar at the exact daily_end minute must still complete
+        # the day on the first bar at/after the boundary)
+        if self.daily_end is not None and bar.datetime.time() >= self.daily_end:
             self.daily_bar.datetime = bar.datetime.replace(
                 hour=0,
                 minute=0,
@@ -474,6 +528,12 @@ class BarGenerator:
     def generate(self) -> BarData | None:
         """
         Generate the bar data and call callback immediately.
+
+        Also flushes any partially-built window/hour bar: this method is
+        the shutdown/session-end hook, and previously only the raw
+        1-minute bar was emitted — a partial x-minute or hour window in
+        progress was silently discarded forever (it has no other exit
+        path once the feed stops).
         """
         bar: BarData | None = self.bar
 
@@ -482,6 +542,17 @@ class BarGenerator:
             self.on_bar(bar)
 
         self.bar = None
+
+        if self.hour_bar:
+            self.on_hour_bar(self.hour_bar)
+            self.hour_bar = None
+
+        if self.window_bar:
+            if self.on_window_bar:
+                self.on_window_bar(self.window_bar)
+            self.window_bar = None
+            self.interval_count = 0
+
         return bar
 
 
