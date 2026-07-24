@@ -252,24 +252,32 @@ class CandleItem(ChartItem):
         bar: BarData | None = self._manager.get_bar(ix)
 
         if bar:
+            # str(float) prints the raw binary value (e.g. 63.997999999),
+            # which no broker app shows — futu/uSMART display clean prices.
+            # Format to 3 decimals and strip trailing zeros so 63.998 shows
+            # as "63.998" and 72.30 as "72.3", matching those apps. Labels
+            # are Chinese for the same reason (this is a Chinese-market UI).
+            def _p(value: float) -> str:
+                return f"{value:.3f}".rstrip("0").rstrip(".")
+
             words: list = [
-                "Date",
+                "日期",
                 bar.datetime.strftime("%Y-%m-%d"),
                 "",
-                "Time",
+                "时间",
                 bar.datetime.strftime("%H:%M"),
                 "",
-                "Open",
-                str(bar.open_price),
+                "开",
+                _p(bar.open_price),
                 "",
-                "High",
-                str(bar.high_price),
+                "高",
+                _p(bar.high_price),
                 "",
-                "Low",
-                str(bar.low_price),
+                "低",
+                _p(bar.low_price),
                 "",
-                "Close",
-                str(bar.close_price)
+                "收",
+                _p(bar.close_price)
             ]
             text: str = "\n".join(words)
         else:
@@ -339,7 +347,9 @@ class VolumeItem(ChartItem):
         bar: BarData | None = self._manager.get_bar(ix)
 
         if bar:
-            text: str = f"Volume {bar.volume}"
+            # Chinese label + integer volume (shares/lots are whole numbers;
+            # the trailing ".0" from a float is broker-app noise).
+            text: str = f"成交量 {int(bar.volume):,}"
         else:
             text = ""
 
