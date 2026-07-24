@@ -115,7 +115,11 @@ class ChartItem(pg.GraphicsObject):
 
         This function is called by external QGraphicsView.
         """
-        rect: QtCore.QRectF = opt.exposedRect
+        # exposedRect is missing from the PySide6 stubs on some platforms
+        # (present on macOS, absent on Windows) — the ignore is required on
+        # CI's Windows runner; it reads as unused only where the stub happens
+        # to include it. It exists at runtime everywhere.
+        rect: QtCore.QRectF = opt.exposedRect       # type: ignore[attr-defined]
 
         min_ix: int = int(rect.left())
         max_ix: int = int(rect.right())
