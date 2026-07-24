@@ -54,13 +54,13 @@ def ta_atr(high: DataProxy, low: DataProxy, close: DataProxy, window: int) -> Da
         h = high_.xs(symbol, level="vt_symbol", drop_level=False)
         low_s = low_.xs(symbol, level="vt_symbol", drop_level=False)
         c = close_.xs(symbol, level="vt_symbol", drop_level=False)
-        atr = talib.ATR(   # type: ignore
-            h.droplevel("vt_symbol"),
-            low_s.droplevel("vt_symbol"),
-            c.droplevel("vt_symbol"),
+        atr_values = talib.ATR(
+            h.droplevel("vt_symbol").to_numpy(),
+            low_s.droplevel("vt_symbol").to_numpy(),
+            c.droplevel("vt_symbol").to_numpy(),
             timeperiod=window,
         )
-        atr.index = c.index
+        atr = pd.Series(atr_values, index=c.index)
         parts.append(atr)
 
     result: pd.Series = pd.concat(parts).reindex(close_.index)

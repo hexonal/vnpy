@@ -115,7 +115,7 @@ class ChartItem(pg.GraphicsObject):
 
         This function is called by external QGraphicsView.
         """
-        rect: QtCore.QRectF = opt.exposedRect       # type: ignore
+        rect: QtCore.QRectF = opt.exposedRect
 
         min_ix: int = int(rect.left())
         max_ix: int = int(rect.right())
