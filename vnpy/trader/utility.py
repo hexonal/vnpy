@@ -873,6 +873,59 @@ class ArrayManager:
         return result_value
 
     @overload
+    def linearreg(self, n: int, array: Literal[False] = False) -> float: ...
+    @overload
+    def linearreg(self, n: int, *, array: Literal[True]) -> np.ndarray: ...
+    def linearreg(self, n: int, array: bool = False) -> float | np.ndarray:
+        """
+        Linear regression (LINEARREG): the least-squares regression line over
+        the last n closes, evaluated AT the current bar — i.e. a least-squares
+        "moving average" of close. Not a forecast; use tsf() to project the
+        line one bar ahead.
+        """
+        result_array: np.ndarray = talib.LINEARREG(self.close, n)
+        if array:
+            return result_array
+
+        result_value: float = result_array[-1]
+        return result_value
+
+    @overload
+    def linearreg_slope(self, n: int, array: Literal[False] = False) -> float: ...
+    @overload
+    def linearreg_slope(self, n: int, *, array: Literal[True]) -> np.ndarray: ...
+    def linearreg_slope(self, n: int, array: bool = False) -> float | np.ndarray:
+        """
+        Slope of the least-squares regression line over the last n closes
+        (LINEARREG_SLOPE) — price change per bar of the fitted trend. tsf ==
+        linearreg + linearreg_slope.
+        """
+        result_array: np.ndarray = talib.LINEARREG_SLOPE(self.close, n)
+        if array:
+            return result_array
+
+        result_value: float = result_array[-1]
+        return result_value
+
+    @overload
+    def tsf(self, n: int, array: Literal[False] = False) -> float: ...
+    @overload
+    def tsf(self, n: int, *, array: Literal[True]) -> np.ndarray: ...
+    def tsf(self, n: int, array: bool = False) -> float | np.ndarray:
+        """
+        Time Series Forecast (TSF): the least-squares regression line over the
+        last n closes projected ONE bar into the future — a linear
+        extrapolation of the recent trend. A weak "next-close" estimate (it
+        only extends a straight line), not a predictive model.
+        """
+        result_array: np.ndarray = talib.TSF(self.close, n)
+        if array:
+            return result_array
+
+        result_value: float = result_array[-1]
+        return result_value
+
+    @overload
     def obv(self, array: Literal[False] = False) -> float: ...
     @overload
     def obv(self, array: Literal[True]) -> np.ndarray: ...
