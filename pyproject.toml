@@ -135,3 +135,12 @@ ignore_missing_imports = true
 # than churn code we don't run.
 module = ["vnpy.alpha.strategy.backtesting"]
 ignore_errors = true
+
+# This fork owns the virtualenv the whole workspace shares, so the path is
+# local here (the sibling gateway packages point at "../vnpy/.venv"). Without
+# it pyright resolves against the system interpreter and reports every
+# third-party import as unresolved.
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"

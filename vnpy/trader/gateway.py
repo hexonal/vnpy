@@ -73,7 +73,12 @@ class BaseGateway(ABC):
     default_name: str = ""
 
     # Fields required in setting dict for connect function.
-    default_setting: dict[str, str | int | float | bool] = {}
+    # `list` renders as a dropdown: ConnectDialog branches on `field_type is
+    # list` and calls addItems() on it (trader/ui/widget.py). The annotation
+    # omitted that, so every gateway offering a choice field type-checked as an
+    # incompatible override of this attribute. Widened to match the behaviour
+    # the UI has always had.
+    default_setting: dict[str, str | int | float | bool | list] = {}
 
     # Exchanges supported in the gateway.
     exchanges: list[Exchange] = []
@@ -265,7 +270,7 @@ class BaseGateway(ABC):
         """
         return []
 
-    def get_default_setting(self) -> dict[str, str | int | float | bool]:
+    def get_default_setting(self) -> dict[str, str | int | float | bool | list]:
         """
         Return default setting dict.
         """
