@@ -4,9 +4,8 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 
-from vnpy.trader.object import BarData, TradeData, OrderData
-from vnpy.trader.constant import Offset, Direction
-
+from vnpy.trader.constant import Direction, Offset
+from vnpy.trader.object import BarData, OrderData, TradeData
 
 if TYPE_CHECKING:
     from vnpy.alpha.strategy.backtesting import BacktestingEngine
@@ -114,6 +113,16 @@ class AlphaStrategy(metaclass=ABCMeta):
         )
 
         for vt_orderid in vt_orderids:
+            # A gateway may push the order's final status from inside
+            # send_order (vnpy_usmart does, and a marketable limit fills at
+            # once), so update_order can run before this line. It removes
+            # from active_orderids only what is already there, so adding
+            # unconditionally would re-add an order that is already done and
+            # leave it active forever — cancel_all would then keep chasing a
+            # dead order every cycle. Consult what update_order recorded.
+            order: OrderData | None = self.orders.get(vt_orderid)
+            if order is not None and not order.is_active():
+                continue
             self.active_orderids.add(vt_orderid)
 
         return vt_orderids
