@@ -37,5 +37,13 @@ jobs:
       - name: Type check
         run: mypy vnpy
 
+      # 本仓此前的 CI 只跑 ruff/mypy/build，一个用例都不执行 —— 于是
+      # tests/test_alpha101.py 里 4 个 NameError 从上游 5881a61b(2025-12-24
+      # 删掉 cast_to_int 却漏改测试)起一直红着，谁也没看见。
+      - name: Test
+        run: |
+          pip install pytest
+          pytest tests -q
+
       - name: Build
         run: uv build
