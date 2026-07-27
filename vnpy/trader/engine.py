@@ -204,9 +204,16 @@ class MainEngine:
             self.write_log(_("找不到引擎：{}").format(engine_name))
         return engine
 
-    def get_default_setting(self, gateway_name: str) -> dict[str, str | bool | int | float] | None:
+    def get_default_setting(
+        self, gateway_name: str
+    ) -> dict[str, str | int | float | bool | list] | None:
         """
         Get default setting dict of a specific gateway.
+
+        联合类型必须与 BaseGateway.get_default_setting 一致（含 list）：网关用
+        list 值表示下拉可选项（uSMART 的 region ['hk','sg']、environment
+        ['real','uat'] 等），ConnectDialog 正是靠它渲染 ComboBox。这里漏掉 list
+        并不会让那些设置消失，只会让转发它们的这一行类型不通过。
         """
         gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
