@@ -21,4 +21,14 @@
 # SOFTWARE.
 
 
-__version__ = "4.4.0"
+# PEP 440 local version segment. This is upstream 4.4.0 plus the hexonal fork's
+# own commits, and the suffix exists so that a run manifest can tell the two
+# apart: `vnpy_alphakit/provenance.py` records `sys.modules["vnpy"].__version__`
+# into every runs/*.json, and its other discriminator — a fingerprint over
+# {symbols, row_count, span} — cannot see a change that only alters computed
+# values. Without the suffix, two manifests straddling the vwap and rolling
+# dtype corrections are byte-for-byte identical.
+#
+# The numeric suffix tracks `vnpy.alpha.semantics.FEATURE_SEMANTICS_VERSION`;
+# bump both together, and roll both back together.
+__version__ = "4.4.0+hexonal.1"

@@ -15,6 +15,12 @@ from vnpy.trader.utility import extract_vt_symbol
 from .logger import logger
 from .dataset import AlphaDataset, to_datetime
 from .model import AlphaModel
+from .semantics import (
+    assert_compatible,
+    assert_parquet_compatible,
+    parquet_metadata,
+    stamp
+)
 
 
 class AlphaLab:
@@ -429,6 +435,11 @@ class AlphaLab:
         """Save dataset"""
         file_path: Path = self.dataset_path.joinpath(f"{name}.pkl")
 
+        # Every artifact leaving the lab carries the feature semantics it was
+        # built under; see vnpy/alpha/semantics.py for why this is a refusal
+        # rather than a warning.
+        stamp(dataset)
+
         with open(file_path, mode="wb") as f:
             pickle.dump(dataset, f)
 
@@ -441,6 +452,7 @@ class AlphaLab:
 
         with open(file_path, mode="rb") as f:
             dataset: AlphaDataset = pickle.load(f)
+            assert_compatible(dataset, file_path)
             return dataset
 
     def remove_dataset(self, name: str) -> bool:
@@ -461,6 +473,8 @@ class AlphaLab:
         """Save model"""
         file_path: Path = self.model_path.joinpath(f"{name}.pkl")
 
+        stamp(model)
+
         with open(file_path, mode="wb") as f:
             pickle.dump(model, f)
 
@@ -473,6 +487,7 @@ class AlphaLab:
 
         with open(file_path, mode="rb") as f:
             model: AlphaModel = pickle.load(f)
+            assert_compatible(model, file_path)
             return model
 
     def remove_model(self, name: str) -> bool:
@@ -493,7 +508,11 @@ class AlphaLab:
         """Save signal"""
         file_path: Path = self.signal_path.joinpath(f"{name}.parquet")
 
-        signal.write_parquet(file_path)
+        # A signal file holds only datetime / vt_symbol / signal — of the three
+        # artifact kinds it is the only one with no trace of the features that
+        # produced it, so the parquet key-value metadata is the only thing that
+        # can ever tell an old signal from a new one.
+        signal.write_parquet(file_path, metadata=parquet_metadata())
 
     def load_signal(self, name: str) -> pl.DataFrame | None:
         """Load signal"""
@@ -501,6 +520,8 @@ class AlphaLab:
         if not file_path.exists():
             logger.error(f"Signal file {name} does not exist")
             return None
+
+        assert_parquet_compatible(file_path)
 
         return pl.read_parquet(file_path)
 

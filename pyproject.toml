@@ -43,7 +43,16 @@ keywords = ["quant", "quantitative", "investment", "trading", "algotrading"]
 
 [project.optional-dependencies]
 alpha = [
-    "polars>=1.26.0",
+    # 1.30.0, not upstream's 1.26.0: the semantics stamp on signal parquets uses
+    # `DataFrame.write_parquet(metadata=...)` and `pl.read_parquet_metadata`, and
+    # both landed in 1.30.0. Checked by unpacking the wheels — 1.26/1.27/1.28/1.29
+    # have neither, and `write_parquet`'s parameters are keyword-only with no
+    # `**kwargs`, so an install honouring the old floor fails at
+    # `AlphaLab.save_signal` with `TypeError: write_parquet() got an unexpected
+    # keyword argument 'metadata'` rather than degrading. Left at 1.26.0 this is
+    # invisible in CI, which resolves to the newest release; it bites only a
+    # lockfile, a constraints file, or anyone reproducing against the floor.
+    "polars>=1.30.0",
     "scipy>=1.15.2",
     "alphalens-reloaded>=0.4.5",
     "scikit-learn>=1.6.1",
