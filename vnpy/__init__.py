@@ -31,4 +31,4 @@
 #
 # The numeric suffix tracks `vnpy.alpha.semantics.FEATURE_SEMANTICS_VERSION`;
 # bump both together, and roll both back together.
-__version__ = "4.4.0+hexonal.1"
+__version__ = "4.4.0+hexonal.2"

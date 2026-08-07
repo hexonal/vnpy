@@ -46,6 +46,83 @@ class DataProxy:
 
         raise TypeError(f"Unsupported comparison result type: {type(value)!r}")
 
+    @staticmethod
+    def _ordering_operand(values: pl.Series) -> pl.Series:
+        """Mask NaN to null, so an ordering comparison answers nothing about it.
+
+        Polars ranks NaN above every real number and hands back a verdict for
+        it, which is the one thing a missing observation must never get.
+        Measured on polars 1.43.0 over Float64 columns: ``NaN > 11.0`` is
+        ``True`` while ``12.0 > NaN`` is ``False`` — the same absent price reads
+        as "greater" from one side and "not greater" from the other.
+
+        ``load_bar_df`` writes ``float("nan")`` across every column of a
+        suspended day, so this lands squarely on Alpha158's fifteen ``cnt*``
+        features, every one of them shaped ``ts_mean(close > ts_delay(close, 1),
+        w)``. Measured on ``close = [10, 11, NaN, NaN, NaN, 12, 11.5, 11.8]``,
+        the unmasked flag series is ``[null, 1, 1, 0, 0, 0, 0, 1]``: the first
+        suspended day is booked as a rise (``NaN > 11.0``), and the resumption
+        day — a real 11.0 -> 12.0, +9.1% — is booked as *not* a rise
+        (``12.0 > NaN``). One halt fabricates one rise and deletes a real one,
+        so the bias is not even one-directional, which is why "cnt* overstates
+        up days" was the wrong description of it.
+
+        None of that leaves a trace. ``_comparison_series`` casts the Boolean to
+        Int32 and the rolling mean averages it, so the fabricated day produces
+        no NaN, no dtype change and no warning. Measured on a synthetic 800-row
+        panel carrying a single three-day halt — 0.375% of the rows — ``cntd_5``
+        moved by 0.800 on a column whose entire range is [-1, 1], ``cntp_5`` and
+        ``cntn_5`` by 0.600 on [0, 1] columns, and the 60-day windows had their
+        trailing 49 to 60 readings rewritten.
+
+        Masking to null rather than dropping the row keeps the answer finite
+        *for short halts*: ``ts_mean`` is ``rolling_map(np.nanmean,
+        min_samples=1)``, so a null window member is skipped and ``cnt*`` reads
+        "of the days actually observed, what fraction were up days" — which is
+        what qlib's ``Mean($close>Ref($close,1), w)`` meant all along.
+
+        **The "short" is load-bearing and was missing from the first version of
+        this note.** A halt of ``h`` sessions blanks ``h + 1`` consecutive
+        flags, not ``h``: the halted days plus the resumption day, whose
+        ``ts_delay(close, 1)`` is the last halted day rather than the last
+        traded one. So a window of ``w`` has nothing left to average whenever
+        ``h >= w - 1`` and the reading goes missing. Measured on a single
+        symbol, counting missing ``cnt*`` readings by halt length: ``w=5`` first
+        loses a reading at ``h=4`` and loses ``h - 3`` of them thereafter, while
+        ``w=10`` / ``w=20`` / ``w=60`` are still lossless at ``h=8``. Alpha158's
+        narrowest window is 5, so **a four-session suspension — routine in
+        A-shares, and normal in HK pending an announcement — already blanks
+        ``cntp_5`` / ``cntn_5`` / ``cntd_5``**, and ``process_drop_na`` then
+        drops those rows outright.
+
+        That is the intended behaviour and not a residual defect: with no
+        observed day in the window there is no fraction to report, and refusing
+        is the whole point. It is written down because the earlier wording
+        ("zero extra NaN") was measured on a three-day halt only and would have
+        been read, by whoever first builds an A-share panel, as a promise the
+        code never made.
+
+        **``__eq__`` and ``__ne__`` keep their NaN on purpose.** Polars answers
+        ``NaN == NaN`` with ``True`` (measured; IEEE 754 says otherwise), and
+        that is a definition rather than an accident — masking it would trade a
+        defined answer for a null.
+
+        **What this does not cover**, written down so nobody reads it as a
+        general NaN guard: ``sign`` returns 1 for NaN, ``quesval`` /
+        ``quesval2`` take their true branch on it, ``ts_less(x, literal)``
+        swallows it, and ``Series.arg_max`` skips it. Four separate producers,
+        four separate mechanisms. Alpha158 reaches none of them; Alpha101
+        reaches all four.
+        """
+        # Guarded on the dtype rather than called unconditionally: NaN is not a
+        # value an Int32 can hold — and every comparison result in this class is
+        # Int32 — so `semantics.finite_predicate` splits on `is_float()` for the
+        # same reason.
+        if values.dtype.is_float():
+            return values.fill_nan(None)
+
+        return values
+
     def result(self, s: pl.Series) -> "DataProxy":
         """Convert series data to feature object"""
         result: pl.DataFrame = self.df[["datetime", "vt_symbol"]]
@@ -153,34 +230,38 @@ class DataProxy:
 
     def __gt__(self, other: Union["DataProxy", Real]) -> "DataProxy":
         """Greater than comparison"""
+        left: pl.Series = self._ordering_operand(self.df["data"])
         if isinstance(other, DataProxy):
-            s: object = self.df["data"] > other.df["data"]
+            s: object = left > self._ordering_operand(other.df["data"])
         else:
-            s = self.df["data"] > other
+            s = left > other
         return self.result(self._comparison_series(s))
 
     def __ge__(self, other: Union["DataProxy", Real]) -> "DataProxy":
         """Greater than or equal comparison"""
+        left: pl.Series = self._ordering_operand(self.df["data"])
         if isinstance(other, DataProxy):
-            s: object = self.df["data"] >= other.df["data"]
+            s: object = left >= self._ordering_operand(other.df["data"])
         else:
-            s = self.df["data"] >= other
+            s = left >= other
         return self.result(self._comparison_series(s))
 
     def __lt__(self, other: Union["DataProxy", Real]) -> "DataProxy":
         """Less than comparison"""
+        left: pl.Series = self._ordering_operand(self.df["data"])
         if isinstance(other, DataProxy):
-            s: object = self.df["data"] < other.df["data"]
+            s: object = left < self._ordering_operand(other.df["data"])
         else:
-            s = self.df["data"] < other
+            s = left < other
         return self.result(self._comparison_series(s))
 
     def __le__(self, other: Union["DataProxy", Real]) -> "DataProxy":
         """Less than or equal comparison"""
+        left: pl.Series = self._ordering_operand(self.df["data"])
         if isinstance(other, DataProxy):
-            s: object = self.df["data"] <= other.df["data"]
+            s: object = left <= self._ordering_operand(other.df["data"])
         else:
-            s = self.df["data"] <= other
+            s = left <= other
         return self.result(self._comparison_series(s))
 
     def __eq__(self, other: Union["DataProxy", Real]) -> "DataProxy":  # type: ignore[override]

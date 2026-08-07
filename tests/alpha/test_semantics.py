@@ -33,8 +33,10 @@ from vnpy.alpha.semantics import (
     FEATURE_SEMANTICS_VERSION,
     SEMANTICS_HISTORY,
     STAMP_ATTRIBUTE,
+    UNSTAMPED_VERSION,
     AlphaSemanticsError,
     assert_compatible,
+    assert_parquet_compatible,
     describe_feature_health,
     read_stamp,
     stamp,
@@ -122,6 +124,42 @@ def test_assert_compatible_accepts_a_freshly_stamped_artifact() -> None:
     stamp(artifact)
 
     assert_compatible(artifact, "dataset/fresh.pkl")
+
+
+def test_refusing_an_unstamped_artifact_names_every_release_since_v0(tmp_path) -> None:  # noqa: ANN001
+    # An unstamped artifact is v0 by definition — the stamp shipped *as* v1 — so
+    # its owner needs the whole changelog, not the newest entry.
+    #
+    # Both unstamped branches used to render
+    # `SEMANTICS_HISTORY[FEATURE_SEMANTICS_VERSION].describe()`. While the table
+    # held a single release that was accidentally the same sentence, so the bug
+    # could not be seen; the moment v2 landed, a v0 artifact started being told
+    # only what v2 changed and never hearing about v1's vwap rebase or Float64
+    # cast at all. Measured: 2359 characters naming both releases against 1495
+    # naming one.
+    #
+    # Written as a loop over the table rather than against a literal "v1:", so
+    # that v3 is covered the day it lands instead of the day somebody remembers.
+    expected: list[str] = [
+        f"v{version}:" for version in range(UNSTAMPED_VERSION + 1, FEATURE_SEMANTICS_VERSION + 1)
+    ]
+
+    with pytest.raises(AlphaSemanticsError) as pickle_refusal:
+        assert_compatible(FakeArtifact(), "dataset/unstamped.pkl")
+
+    for marker in expected:
+        assert marker in str(pickle_refusal.value), marker
+
+    # The parquet branch is a separate copy of the same message, and signals are
+    # the artifact with the least other evidence of what built them.
+    bare: Path = tmp_path / "unstamped.parquet"
+    pl.DataFrame({"signal": [1.0]}).write_parquet(bare)
+
+    with pytest.raises(AlphaSemanticsError) as parquet_refusal:
+        assert_parquet_compatible(bare)
+
+    for marker in expected:
+        assert marker in str(parquet_refusal.value), marker
 
 
 def test_every_version_up_to_the_current_one_has_a_history_entry() -> None:

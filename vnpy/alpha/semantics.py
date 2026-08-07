@@ -83,11 +83,24 @@ class AlphaSemanticsError(Exception):
 # turns this module from a guard into a hazard: the check is an equality test,
 # so old code carrying a new constant would happily stamp and accept artifacts
 # built under the old semantics.
-FEATURE_SEMANTICS_VERSION: int = 1
+FEATURE_SEMANTICS_VERSION: int = 2
 
 # The attribute written onto pickled artifacts, and the parquet key-value
 # metadata key written into signal files.
 STAMP_ATTRIBUTE: str = "feature_semantics_version"
+
+# What an artifact carrying no stamp at all is taken to be. Not a free choice:
+# the stamp was introduced *as* v1, so anything without one predates it, and
+# `SEMANTICS_HISTORY[0]` is the entry describing that state.
+#
+# Named rather than written as a literal `0` because the two unstamped branches
+# below used to render `SEMANTICS_HISTORY[FEATURE_SEMANTICS_VERSION]` instead —
+# only the newest release. While the table held one entry that was accidentally
+# the same sentence, so the bug could not be seen; the moment v2 landed, a v0
+# artifact started being told only what v2 changed and never heard about v1's
+# vwap rebase or Float64 cast at all. Measured: `describe_gap(0)` renders 2359
+# characters naming both releases, the old expression 1495 naming only v2.
+UNSTAMPED_VERSION: int = 0
 
 
 @dataclass(frozen=True)
@@ -131,6 +144,39 @@ SEMANTICS_HISTORY: dict[int, SemanticsRelease] = {
             "AlphaDataset built from a frame assembled some other way need not."
         ),
         invalidates="every dataset pickle, model pickle and signal parquet built under v0",
+    ),
+    2: SemanticsRelease(
+        version=2,
+        summary=(
+            "DataProxy's four ordering comparisons mask NaN to null before comparing, so a "
+            "suspended day is no longer handed a verdict. Under v1 polars answered `NaN > 11.0` "
+            "with True and `12.0 > NaN` with False, which booked the first halted day as a rise "
+            "and deleted the real rise on the day trading resumed; the Int32 cast and the rolling "
+            "mean then buried it, leaving no NaN, no dtype change and no warning behind. "
+            "Alpha158's fifteen cnt* features are the entire blast radius. Measured with one "
+            "three-day halt on an 800-row synthetic panel (0.375% of rows): exactly those 15 "
+            "columns move — cntd_5 by 0.800 on a column whose range is [-1, 1], cntp_5 by 0.600 "
+            "on [0, 1] — 411 cells in total, with no reading going missing at that halt length. "
+            "Longer halts do make readings go missing, by design: a halt of h sessions blanks "
+            "h + 1 flags (the halted days plus the resumption day, whose ts_delay(close, 1) is "
+            "itself a halted day), so a window of w has nothing left to average once h >= w - 1. "
+            "Measured on one symbol: w=5 loses its first reading at h=4 and h - 3 of them "
+            "thereafter, while w=10/20/60 are still lossless at h=8. Alpha158's narrowest window "
+            "is 5, so a four-session suspension already blanks cntp_5/cntn_5/cntd_5 and "
+            "process_drop_na then drops those rows. `vnpy_alphakit`'s fingerprint "
+            "fixture, which carries a suspended day every 37 days and runs the full "
+            "save_bar_data -> load_bar_df -> prepare_data path, names the same fifteen columns "
+            "and no others. Measured on panels with no "
+            "suspended row in them, including hk_bluechip_10 (7350 rows, 0 mask hits): all 158 "
+            "columns bit-identical, so a v1 artifact built from suspension-free bars carries the "
+            "same numbers a v2 one would. The stamp cannot say that — it compares one integer at "
+            "load time and never sees the panel — which is why such artifacts are refused too."
+        ),
+        invalidates=(
+            "every dataset pickle, model pickle and signal parquet built under v1 from bars that "
+            "contain a suspended day; v1 artifacts from suspension-free panels are numerically "
+            "equal to their v2 recomputation and are refused anyway"
+        ),
     ),
 }
 
@@ -176,7 +222,7 @@ def assert_compatible(obj: object, source: str | Path) -> None:
         raise AlphaSemanticsError(
             f"产物 {source} 没有特征语义版本戳，判定为 v0 旧口径，拒绝加载——"
             f"当前代码要求 {STAMP_ATTRIBUTE}={FEATURE_SEMANTICS_VERSION}。"
-            f"{SEMANTICS_HISTORY[FEATURE_SEMANTICS_VERSION].describe()}。"
+            f"{describe_gap(UNSTAMPED_VERSION)}。"
             f"请用当前代码重算该产物；改动清单见 vnpy/FORK.md"
         )
 
@@ -226,7 +272,7 @@ def assert_parquet_compatible(file_path: Path) -> None:
         raise AlphaSemanticsError(
             f"产物 {file_path} 没有特征语义版本戳，判定为 v0 旧口径，拒绝加载——"
             f"当前代码要求 {STAMP_ATTRIBUTE}={FEATURE_SEMANTICS_VERSION}。"
-            f"{SEMANTICS_HISTORY[FEATURE_SEMANTICS_VERSION].describe()}。"
+            f"{describe_gap(UNSTAMPED_VERSION)}。"
             f"请用当前代码重算该产物；改动清单见 vnpy/FORK.md"
         )
 
