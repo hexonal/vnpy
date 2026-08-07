@@ -225,11 +225,43 @@ class AlphaLab:
                 continue
             close_0: float = nonzero_close.item(0, 0)
 
+            # vwap is rebased by the SAME close_0 as the four price columns.
+            # Upstream listed the four by name and left vwap — computed above in
+            # raw price units — untouched, which turned Alpha158's
+            # `vwap_0 = vwap / close` into `(raw_vwap / raw_close) * close_0`:
+            # a per-symbol constant times a ratio hugging 1.0, i.e. a stock
+            # identifier rather than a factor. Measured on the workspace's ten
+            # Hong Kong symbols, the per-symbol ranges did not overlap at all
+            # (1810.SEHK [10.62, 11.91] against 700.SEHK [303.71, 330.59]), the
+            # between-symbol to within-symbol spread ratio was 26.81, and the
+            # shipped LightGBM booster split all three tree roots on it
+            # (`vwap_0 <= 43.781305`). Rebased, the ten symbols collapse onto
+            # one band [0.963244, 1.418407], the ratio falls to 1.12, and the
+            # column's rank IC against the label flips -0.0397 -> +0.0454.
+            #
+            # The line has to sit exactly here. Earlier and close_0 — read from
+            # the raw close on the line above — would already be 1.0; later than
+            # the suspended-day mask below and vwap is already NaN.
+            #
+            # `volume` and `turnover` stay in raw units, so `vwap * volume` no
+            # longer reproduces `turnover` — measured, it comes out short by
+            # exactly 1/close_0. That is not a new inconsistency: `close` has
+            # been rebased since upstream and therefore already carried the same
+            # 1/close_0 offset against raw turnover (measured on the same frame:
+            # close*volume/turnover = 1/(0.996*close_0) both before and after).
+            # vwap is a price, so it belongs with the prices and inherits what
+            # they inherit. Rebasing turnover too would restore the identity, but
+            # it is a currency amount, not a price — upstream deliberately leaves
+            # the volume family raw and lets Alpha158 handle it through
+            # self-normalizing ratios (vma_w = ts_mean(volume,w)/volume), and no
+            # shipped Alpha158 or Alpha101 expression reads turnover at all.
+            # Changing it would be a second semantics change bought for nothing.
             df = df.with_columns(
                 (pl.col("open") / close_0).alias("open"),
                 (pl.col("high") / close_0).alias("high"),
                 (pl.col("low") / close_0).alias("low"),
                 (pl.col("close") / close_0).alias("close"),
+                (pl.col("vwap") / close_0).alias("vwap"),
             )
 
             # Convert suspended day values (incl. the NaN vwap) to NaN
