@@ -37,9 +37,9 @@ class MlpModel(AlphaModel):
         input_size: int,
         hidden_sizes: tuple[int] = (256,),
         lr: float = 0.001,
-        n_epochs: int = 300,
+        n_steps: int = 3000,
         batch_size: int = 2000,
-        early_stop_rounds: int = 50,
+        early_stop_evals: int = 50,
         eval_steps: int = 20,
         optimizer: Literal["sgd", "adam"] = "adam",
         weight_decay: float = 0.0,
@@ -57,12 +57,34 @@ class MlpModel(AlphaModel):
             Number of neurons in hidden layers
         lr : float, default 0.001
             Learning rate
-        n_epochs : int, default 300
-            Maximum training steps
+        n_steps : int, default 3000
+            Maximum number of GRADIENT STEPS. This used to be called `n_epochs`,
+            which was wrong in a way that silently changed training length with
+            dataset size: `_train_step` draws ONE batch per iteration with
+            `np.random.choice` (with replacement), so a step is a step, never a
+            pass over the data. Measured on this file before the rename —
+            300 steps x batch 2000 = 600,000 draws, which is ~5 nominal epochs
+            over a 120k-row training set but ~150 nominal epochs over a 4k-row
+            one. Same number in the config, two opposite failure modes.
+            The default moved 300 -> 3000 because 300 is simply undertrained:
+            on a synthetic 8-feature problem with a 0.09 noise floor, best
+            validation MSE went 0.113879 (300) -> 0.105678 (1000) ->
+            0.102548 (3000) -> 0.101696 (8000), i.e. 300 steps leaves roughly
+            half of the removable error on the table. The cost of the new
+            default is 10x the training time.
         batch_size : int, default 2000
             Number of samples per batch
-        early_stop_rounds : int, default 50
-            Early stopping rounds, training stops if validation loss doesn't improve within these rounds
+        early_stop_evals : int, default 50
+            Number of consecutive EVALUATIONS without improvement that ends
+            training. The unit is evaluations, not steps — one evaluation
+            happens every `eval_steps` steps, so the patience in steps is
+            `early_stop_evals * eval_steps`. Under the old name
+            (`early_stop_rounds`) plus the old `n_epochs=300` default the
+            counter could reach at most 14 (300 // 20 evaluations, minus the
+            first one which always improves against an initial score of inf),
+            so early stopping was unreachable arithmetic — measured, not
+            inferred. The constructor now refuses unreachable combinations
+            rather than pretending to offer the feature.
         eval_steps : int, default 20
             Evaluate model every this many steps
         optimizer : Literal["sgd", "adam"], default "adam"
@@ -74,13 +96,30 @@ class MlpModel(AlphaModel):
         device : str, default "cpu"
             Training device
         """
+        # Refuse an early-stopping budget the training loop can never spend.
+        # The loop evaluates at `step % eval_steps == 0` plus once at the final
+        # step, and the very first evaluation always improves (best_valid_score
+        # starts at inf) and resets the counter — so the counter's ceiling is
+        # `n_evals - 1`. Silently accepting a larger `early_stop_evals` is how
+        # the upstream defaults ended up advertising early stopping that could
+        # not fire; refusing is cheap and the message names the numbers.
+        n_evals: int = n_steps // eval_steps + (1 if n_steps % eval_steps else 0)
+        if n_evals - 1 < early_stop_evals:
+            raise ValueError(
+                f"早停永远不会触发：n_steps={n_steps} 配 eval_steps={eval_steps} "
+                f"最多只有 {n_evals} 次评估、计数器上界 {n_evals - 1}，"
+                f"而 early_stop_evals={early_stop_evals}。"
+                f"请把 early_stop_evals 降到 {n_evals - 1} 以下，或把 n_steps 提高到 "
+                f"{(early_stop_evals + 1) * eval_steps} 以上"
+            )
+
         # Save model hyperparameters
         self.input_size: int = input_size
         self.hidden_sizes: tuple[int] = hidden_sizes
         self.lr: float = lr
-        self.n_epochs: int = n_epochs
+        self.n_steps: int = n_steps
         self.batch_size: int = batch_size
-        self.early_stop_rounds: int = early_stop_rounds
+        self.early_stop_evals: int = early_stop_evals
         self.eval_steps: int = eval_steps
         self.device: str = device
         self.fitted: bool = False
@@ -184,17 +223,17 @@ class MlpModel(AlphaModel):
         self.feature_names = df.columns[2:-1]
 
         # Initialize training state
-        early_stop_count: int = 0           # Number of steps without performance improvement
+        early_stop_count: int = 0           # Number of evaluations without performance improvement
         train_loss: float = 0               # Current training loss
         best_valid_score: float = np.inf    # Best validation loss
-        best_params = None                  # Best model parameters
+        best_params: dict[str, torch.Tensor] | None = None   # Best model parameters
 
         train_samples: int = train_valid_data["y"][Segment.TRAIN].shape[0]
 
         # Iterate through training steps
-        for step in range(1, self.n_epochs + 1):
+        for step in range(1, self.n_steps + 1):
             # Check if early stopping condition is met
-            if early_stop_count >= self.early_stop_rounds:
+            if early_stop_count >= self.early_stop_evals:
                 logger.info("达到早停条件,训练结束")
                 break
 
@@ -203,22 +242,36 @@ class MlpModel(AlphaModel):
             train_loss += batch_loss
 
             # Periodically evaluate the model
-            if step % self.eval_steps == 0 or step == self.n_epochs:
+            #
+            # `best_params` must go IN as well as come out. The previous version
+            # only took the return value, and `_evaluate_step` built its own
+            # `best_params = None` on entry — so every non-improving evaluation
+            # reset the local back to None. Since early stopping is by
+            # definition N consecutive non-improving evaluations, the rollback
+            # below could never run on an early-stopped fit; and even without
+            # early stopping it ran only when the very LAST evaluation happened
+            # to be the best one. Measured on a rigged run (validation labels
+            # sign-flipped so validation loss worsens monotonically):
+            # best_step=7, |final - best| on network.1.weight = 1.72e-01 before,
+            # exactly 0.0 after.
+            if step % self.eval_steps == 0 or step == self.n_steps:
                 early_stop_count, best_valid_score, best_params = self._evaluate_step(
                     train_valid_data,
                     evaluation_results,
                     step,
                     train_loss,
                     early_stop_count,
-                    best_valid_score
+                    best_valid_score,
+                    best_params
                 )
                 train_loss = 0
 
         # Mark model as trained
         self.fitted = True
 
-        # Load best model parameters
-        if best_params:
+        # Load best model parameters — `is not None` rather than truthiness,
+        # because an empty state_dict is falsy and would skip the rollback.
+        if best_params is not None:
             self.model.load_state_dict(best_params)
 
     def _train_step(
@@ -268,7 +321,8 @@ class MlpModel(AlphaModel):
         step: int,
         train_loss: float,
         early_stop_count: int,
-        best_valid_score: float
+        best_valid_score: float,
+        best_params: dict[str, torch.Tensor] | None
     ) -> tuple[int, float, dict[str, torch.Tensor] | None]:
         """
         Evaluate current model performance
@@ -284,13 +338,16 @@ class MlpModel(AlphaModel):
         train_loss : float
             Current training loss
         early_stop_count : int
-            Count of steps without improvement
+            Count of consecutive evaluations without improvement
         best_valid_score : float
             Best validation loss
+        best_params : dict | None
+            Best model parameters seen so far, carried in so that a
+            non-improving evaluation returns it untouched instead of erasing it
 
         Returns
         -------
-        tuple[int, float, dict] | None
+        tuple[int, float, dict | None]
             Returns updated early stop count, best validation loss, and best model parameters
         """
         early_stop_count += 1
@@ -312,7 +369,6 @@ class MlpModel(AlphaModel):
         evaluation_results[Segment.VALID].append(loss_val)
 
         # Update best model if validation performance improves
-        best_params = None
         if loss_val < best_valid_score:
             logger.info(f"\t验证集损失从 {best_valid_score:.6f} 降低到 {loss_val:.6f}")
             best_valid_score = loss_val
@@ -425,18 +481,27 @@ class MlpModel(AlphaModel):
         if torch.isnan(tensor).any():
             print(f"NaN values detected: {name}")
 
-    def detail(self) -> pd.DataFrame | None:
+    def detail(self) -> None:
         """
         Output MLP model detail information
 
-        Returns
-        -------
-        pd.DataFrame
-            Feature importance dataframe
+        This used to end by returning a feature-importance table computed from
+        `torch.randn(1000, input_size)` — synthetic standard-normal rows, not
+        the model's actual inputs. Three problems, all reproduced: the tensor
+        was never seeded, so three calls on ONE trained model produced three
+        different top-5 orderings; the randn rows carry none of the real
+        features' cross-correlation, while the network's BatchNorm running
+        statistics were fitted on real data; and the score itself was
+        `std(|new_pred - base_pred|)`, the SPREAD of the perturbation effect,
+        which assigns importance 0 to a feature that shifts every prediction
+        by the same amount. Seeding would have fixed only the first.
+        The table is gone rather than patched; `permutation_importance` below
+        does the same job against real data, and `detail()` now returns None
+        like its LgbModel and LassoModel siblings.
         """
         if not self.fitted:
             logger.info("模型尚未训练，无法显示详细信息")
-            return None
+            return
 
         # 显示模型基本信息
         logger.info(f"输入特征维度: {self.input_size}")
@@ -450,44 +515,71 @@ class MlpModel(AlphaModel):
         logger.info(f"训练设备: {self.device}")
         logger.info(f"当前学习率: {self.lr}")
         logger.info(f"批次大小: {self.batch_size}")
+        logger.info(f"最优步数: {self.best_step}")
 
-        # Calculate feature importance
-        importance_df = self._calculate_feature_importance()
-        return importance_df
-
-    def _calculate_feature_importance(self) -> pd.DataFrame:
+    def permutation_importance(
+        self,
+        dataset: AlphaDataset,
+        segment: Segment,
+        seed: int = 0
+    ) -> pd.DataFrame:
         """
-        Calculate feature importance
+        Feature importance by permuting one real column at a time
+
+        Each feature's column is shuffled across rows of the requested segment
+        while every other column stays put — the marginal distribution survives,
+        the feature's link to the row is destroyed. Importance is the mean
+        absolute change in prediction, so a feature that merely shifts the whole
+        output still scores. The shuffle is seeded, so two calls on one model
+        return identical rankings.
+
+        Feed it a held-out segment (VALID or TEST): permuting TRAIN measures how
+        hard the network memorised, not how much the feature carries.
+
+        Parameters
+        ----------
+        dataset : AlphaDataset
+            Dataset to draw the real feature rows from
+        segment : Segment
+            Which segment to permute
+        seed : int, default 0
+            Seed for the row permutation, so the ranking is reproducible
 
         Returns
         -------
         pd.DataFrame
-            Feature importance dataframe
+            Feature importance dataframe, indexed by feature name, descending
         """
-        self.model.eval()
+        if not self.fitted:
+            raise ValueError("模型尚未训练，无法计算特征重要性")
+
+        df: pl.DataFrame = dataset.fetch_infer(segment)
+        df = df.sort(["datetime", "vt_symbol"])
+
+        features: np.ndarray = df.select(df.columns[2: -1]).to_numpy()
+        data: torch.Tensor = torch.from_numpy(features).float().to(self.device)
+
+        base: torch.Tensor = cast(torch.Tensor, self._predict_batch(data, return_cpu=False))
+
+        rng = np.random.default_rng(seed)
         importance_dict: dict[str, float] = {}
 
-        test_data = torch.randn(1000, self.input_size).to(self.device)
-        base_pred = self.model(test_data).detach()
+        for i, feature_name in enumerate(df.columns[2: -1]):
+            perturbed: torch.Tensor = data.clone()
+            order = torch.from_numpy(rng.permutation(len(data))).to(self.device)
+            perturbed[:, i] = data[order, i]
 
-        noise_level = 0.1
-        for i, feature_name in enumerate(self.feature_names):
-            perturbed_data = test_data.clone()
-            perturbed_data[:, i] += torch.randn(1000).to(self.device) * noise_level
+            pred: torch.Tensor = cast(torch.Tensor, self._predict_batch(perturbed, return_cpu=False))
+            importance_dict[feature_name] = (pred - base).abs().mean().item()
 
-            with torch.no_grad():
-                new_pred = self.model(perturbed_data)
-                importance = torch.std(torch.abs(new_pred - base_pred)).item()
-                importance_dict[feature_name] = importance
-
-        df: pd.DataFrame = pd.DataFrame({
+        result: pd.DataFrame = pd.DataFrame({
             "Feature": list(importance_dict.keys()),
             "Importance": list(importance_dict.values())
         })
-        df = df.sort_values("Importance", ascending=False)
-        df = df.set_index("Feature")
+        result = result.sort_values("Importance", ascending=False)
+        result = result.set_index("Feature")
 
-        return df
+        return result
 
 
 class AverageMeter:
