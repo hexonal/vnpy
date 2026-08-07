@@ -95,8 +95,31 @@ def quesval(threshold: float, feature1: DataProxy, feature2: DataProxy | float |
 
 
 def quesval2(threshold: DataProxy, feature1: DataProxy, feature2: DataProxy | float | int, feature3: DataProxy | float | int) -> DataProxy:
-    """Return feature2 if threshold < feature1, otherwise feature3 (DataProxy threshold version)"""
-    df_merged: pl.DataFrame = threshold.df.join(feature1.df, on=["datetime", "vt_symbol"], maintain_order="left", suffix="_cond")
+    """Return feature2 if threshold < feature1, otherwise feature3 (DataProxy threshold version)
+
+    The rename before the join is load-bearing, not cosmetic. Written as
+    ``threshold.df.join(feature1.df, suffix="_cond")`` — which is what this
+    function used to say — polars suffixes the *right* frame, so ``data_cond``
+    held ``feature1`` and the bare ``data`` held ``threshold``; the comparison
+    below then read ``feature1 < threshold`` and every caller got the negation
+    of what it asked for. Measured: ``quesval2(0, 1, 1, 0)`` answered 0.
+
+    All eleven Alpha101 expressions that route through here — alpha7, 21, 23,
+    61, 74, 75, 81, 86, 92, 95, 99 — transcribe a ``(a < b) ? x : y`` from
+    Kakushadze (2016) with ``a`` as ``threshold``, so all eleven were inverted.
+    ``alpha86`` is the one that showed: with ``a`` a ``ts_rank`` in ``[0, 1]``
+    and ``b`` a ``cs_rank``, the reversed test could never fire and the column
+    came out the constant 0 on all 7350 rows of ``hk_bluechip_10``. The other
+    ten stayed plausible-looking, which is why this survived — a factor with the
+    wrong sign still has variance, still has a rank IC, and still trains.
+
+    Naming the column instead of relying on which side of a join collects the
+    suffix is the actual repair: the sibling ``quesval`` never had the bug
+    because its threshold is a scalar and no join was involved.
+    """
+    df_merged: pl.DataFrame = threshold.df.rename({"data": "data_cond"}).join(
+        feature1.df, on=["datetime", "vt_symbol"], maintain_order="left"
+    )
 
     if isinstance(feature2, DataProxy):
         df_merged = df_merged.join(feature2.df, on=["datetime", "vt_symbol"], maintain_order="left", suffix="_true")
