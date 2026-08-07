@@ -1,4 +1,38 @@
-"""Time Series Operators"""
+"""
+Time Series Operators
+=====================
+
+* **Every ``rolling_map`` input is cast to Float64 first — except where an
+  integer answer is the definition.** Polars pushes whatever the Python
+  callable returns back through the *input* column's dtype, so an Int32 input
+  makes ``ts_mean`` truncate its own average toward zero. Measured on polars
+  1.43.0, input ``[1, 0, 1, 1, 0, 1, 0, 0]`` with ``window=5``: ``ts_mean``
+  answered ``[1, 0, 0, 0, 0, 0, 0, 0]`` where the arithmetic says
+  ``[1.0, 0.5, 0.667, 0.75, 0.6, 0.6, 0.6, 0.4]``, and ``ts_std`` answered all
+  zeros. No warning, no dtype change the caller could notice — the column just
+  quietly became a "were ALL of the last w days up days" indicator, because 1.0
+  is the only mean that survives truncation.
+
+* **Integer inputs are routine, not exotic.** ``DataProxy`` comparisons cast to
+  Int32 deliberately (``rolling_map`` refuses Boolean outright with
+  ``InvalidOperationError``), which is how Alpha158's fifteen ``cnt*`` features
+  arrive; and ``quesval`` / ``quesval2`` / ``sign`` build ``pl.lit(1)`` /
+  ``pl.lit(0)`` branches that are Int32 too and never pass through the
+  comparison helper at all, which is how Alpha101's ``alpha92`` arrives.
+
+* **Why the cast lives here rather than at the producers.** The set of integer
+  producers is a list somebody has to keep complete — and the first attempt at
+  enumerating it already missed the ``quesval`` branch. "A mean is a real
+  number" needs no enumeration and holds for producers that do not exist yet.
+  The cost is a wider merge surface against upstream, which is rewriting this
+  file: a textual conflict is loud, a silently re-introduced truncation is not.
+
+* **The three operators left un-cast** — ``ts_argmax``, ``ts_argmin``,
+  ``ts_product`` — return integers by definition when fed integers, so the
+  round trip loses nothing. ``rolling_map`` itself has no ``return_dtype``
+  parameter in polars 1.43.0 (passing one raises ``TypeError``), which is why
+  the input is retyped rather than the output.
+"""
 
 from typing import cast
 
@@ -41,6 +75,8 @@ def ts_max(feature: DataProxy, window: int) -> DataProxy:
 
 def ts_argmax(feature: DataProxy, window: int) -> DataProxy:
     """Return the index of the maximum value over a rolling window"""
+    # No Float64 cast here or in ts_argmin: a position within the window is a
+    # whole number whatever the values are, so dtype round-tripping is exact.
     df: pl.DataFrame = feature.df.select(
         pl.col("datetime"),
         pl.col("vt_symbol"),
@@ -61,10 +97,11 @@ def ts_argmin(feature: DataProxy, window: int) -> DataProxy:
 
 def ts_rank(feature: DataProxy, window: int) -> DataProxy:
     """Calculate the percentile rank of the current value within the window"""
+    # Float64 in — a percentile is a fraction (see the module docstring).
     df: pl.DataFrame = feature.df.select(
         pl.col("datetime"),
         pl.col("vt_symbol"),
-        pl.col("data").rolling_map(lambda s: stats.percentileofscore(s, s[-1]) / 100, window).over("vt_symbol")
+        pl.col("data").cast(pl.Float64).rolling_map(lambda s: stats.percentileofscore(s, s[-1]) / 100, window).over("vt_symbol")
     )
     return DataProxy(df)
 
@@ -81,20 +118,22 @@ def ts_sum(feature: DataProxy, window: int) -> DataProxy:
 
 def ts_mean(feature: DataProxy, window: int) -> DataProxy:
     """Calculate the mean over a rolling window"""
+    # Float64 in — the mean of 0/1 flags is a fraction (see the module docstring).
     df: pl.DataFrame = feature.df.select(
         pl.col("datetime"),
         pl.col("vt_symbol"),
-        pl.col("data").rolling_map(lambda s: np.nanmean(s), window, min_samples=1).over("vt_symbol")
+        pl.col("data").cast(pl.Float64).rolling_map(lambda s: np.nanmean(s), window, min_samples=1).over("vt_symbol")
     )
     return DataProxy(df)
 
 
 def ts_std(feature: DataProxy, window: int) -> DataProxy:
     """Calculate the standard deviation over a rolling window"""
+    # Float64 in — without it an integer input reports zero dispersion always.
     df: pl.DataFrame = feature.df.select(
         pl.col("datetime"),
         pl.col("vt_symbol"),
-        pl.col("data").rolling_map(lambda s: np.nanstd(s, ddof=0), window, min_samples=1).over("vt_symbol")
+        pl.col("data").cast(pl.Float64).rolling_map(lambda s: np.nanstd(s, ddof=0), window, min_samples=1).over("vt_symbol")
     )
     return DataProxy(df)
 
@@ -129,10 +168,11 @@ def ts_slope(feature: DataProxy, window: int) -> DataProxy:
 
 def ts_quantile(feature: DataProxy, window: int, quantile: float) -> DataProxy:
     """Calculate the quantile value over a rolling window"""
+    # Float64 in — linear interpolation lands between the samples by design.
     df: pl.DataFrame = feature.df.select(
         pl.col("datetime"),
         pl.col("vt_symbol"),
-        pl.col("data").rolling_map(lambda s: s.quantile(quantile=quantile, interpolation="linear"), window).over("vt_symbol")
+        pl.col("data").cast(pl.Float64).rolling_map(lambda s: s.quantile(quantile=quantile, interpolation="linear"), window).over("vt_symbol")
     )
     return DataProxy(df)
 
@@ -311,16 +351,20 @@ def ts_decay_linear(feature: DataProxy, window: int) -> DataProxy:
         denominator: int = window * (window + 1) // 2
         return float((s * weights).sum() / denominator)
 
+    # Float64 in — a weighted average divided by window*(window+1)/2 is a
+    # fraction; alpha92 reaches this operator carrying quesval2's Int32 flags.
     df: pl.DataFrame = feature.df.select(
         pl.col("datetime"),
         pl.col("vt_symbol"),
-        pl.col("data").rolling_map(lambda s: decay_func(s), window).over("vt_symbol")
+        pl.col("data").cast(pl.Float64).rolling_map(lambda s: decay_func(s), window).over("vt_symbol")
     )
     return DataProxy(df)
 
 
 def ts_product(feature: DataProxy, window: int) -> DataProxy:
     """Calculate the product over a rolling window"""
+    # No Float64 cast: a product of integers is an integer, so the round trip
+    # is exact — and casting would trade that exactness for float rounding.
     df: pl.DataFrame = feature.df.select(
         pl.col("datetime"),
         pl.col("vt_symbol"),
