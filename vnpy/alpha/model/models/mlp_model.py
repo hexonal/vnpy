@@ -16,6 +16,7 @@ from vnpy.alpha import (
     Segment,
     logger
 )
+from vnpy.alpha.dataset import LABEL_NAME, feature_names, select_features
 
 
 
@@ -51,8 +52,19 @@ class MlpModel(AlphaModel):
 
         Parameters
         ----------
-        input_size : int, default 360
-            Input feature dimension
+        input_size : int
+            Input feature dimension — the number of feature columns the
+            dataset actually carries, which for Alpha158 is 158 (measured:
+            `prepare_data` produces datetime + vt_symbol + 158 features +
+            label). There is deliberately no default: the docstring used to
+            claim `default 360`, a leftover from qlib's Alpha360, while the
+            signature has always made this a required positional argument.
+            A wrong value is at least loud — torch refuses the first matmul
+            with `mat1 and mat2 shapes cannot be multiplied (512x158 and
+            157x256)` — but it is loud at fit time, one cell after the
+            processor that changed the column count. Derive it from the
+            frame (`len(feature_names(dataset.learn_df))`) rather than
+            writing the literal twice.
         hidden_sizes : tuple[int], default (256,)
             Number of neurons in hidden layers
         lr : float, default 0.001
@@ -201,6 +213,14 @@ class MlpModel(AlphaModel):
         # Dictionary to store training and validation data
         train_valid_data: dict[str, dict] = defaultdict(dict)
 
+        # Get feature names first, by name rather than by df.columns[2:-1] —
+        # the positional slice fed `label` in as an input feature whenever a
+        # column sat after it, and TRAIN/VALID would then have picked their
+        # columns independently of each other. See dataset/template.py.
+        # Deriving the list once from TRAIN also makes VALID prove it carries
+        # the same columns instead of quietly supplying different ones.
+        self.feature_names = feature_names(dataset.fetch_learn(Segment.TRAIN))
+
         # Process training and validation sets separately
         for segment in [Segment.TRAIN, Segment.VALID]:
             # Get learning data and sort by time and trading code
@@ -208,8 +228,8 @@ class MlpModel(AlphaModel):
             df = df.sort(["datetime", "vt_symbol"])
 
             # Extract features and labels
-            features = df.select(df.columns[2: -1]).to_numpy()
-            labels = np.array(df["label"])
+            features = select_features(df, self.feature_names).to_numpy()
+            labels = np.array(df[LABEL_NAME])
 
             # Store feature and label data
             train_valid_data["x"][segment] = torch.from_numpy(features).float().to(self.device)
@@ -217,10 +237,6 @@ class MlpModel(AlphaModel):
 
             # Initialize evaluation results list
             evaluation_results[segment] = []
-
-        # Get feature names
-        df = dataset.fetch_learn(Segment.TRAIN)
-        self.feature_names = df.columns[2:-1]
 
         # Initialize training state
         early_stop_count: int = 0           # Number of evaluations without performance improvement
@@ -459,7 +475,10 @@ class MlpModel(AlphaModel):
         df: pl.DataFrame = dataset.fetch_infer(segment)
         df = df.sort(["datetime", "vt_symbol"])
 
-        data: np.ndarray = df.select(df.columns[2: -1]).to_numpy()
+        # Same columns, same order as fit() saw — the network's first Linear
+        # layer only checks the width, so a shifted slice of the right width
+        # would have gone straight through it.
+        data: np.ndarray = select_features(df, self.feature_names).to_numpy()
 
         return cast(np.ndarray, self._predict_batch(torch.Tensor(data)))
 
@@ -556,7 +575,7 @@ class MlpModel(AlphaModel):
         df: pl.DataFrame = dataset.fetch_infer(segment)
         df = df.sort(["datetime", "vt_symbol"])
 
-        features: np.ndarray = df.select(df.columns[2: -1]).to_numpy()
+        features: np.ndarray = select_features(df, self.feature_names).to_numpy()
         data: torch.Tensor = torch.from_numpy(features).float().to(self.device)
 
         base: torch.Tensor = cast(torch.Tensor, self._predict_batch(data, return_cpu=False))
@@ -564,7 +583,10 @@ class MlpModel(AlphaModel):
         rng = np.random.default_rng(seed)
         importance_dict: dict[str, float] = {}
 
-        for i, feature_name in enumerate(df.columns[2: -1]):
+        # Column i of `data` is self.feature_names[i] by construction above,
+        # so the importance ranking is labelled with the name that actually
+        # occupies that column instead of whatever position i happens to hit.
+        for i, feature_name in enumerate(self.feature_names):
             perturbed: torch.Tensor = data.clone()
             order = torch.from_numpy(rng.permutation(len(data))).to(self.device)
             perturbed[:, i] = data[order, i]

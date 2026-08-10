@@ -5,7 +5,7 @@ import polars as pl
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 
-from vnpy.alpha.dataset import AlphaDataset, Segment
+from vnpy.alpha.dataset import AlphaDataset, LABEL_NAME, Segment, feature_names, select_features
 from vnpy.alpha.model import AlphaModel
 
 
@@ -72,9 +72,14 @@ class LgbModel(AlphaModel):
             df: pl.DataFrame = dataset.fetch_learn(segment)
             df = df.sort(["datetime", "vt_symbol"])
 
+            # Features come from feature_names(), not df.columns[2:-1] —
+            # the positional slice silently promoted `label` to a feature
+            # whenever any column sat after it. See dataset/template.py.
+            names: list[str] = feature_names(df)
+
             # Convert to numpy arrays
-            data = df.select(df.columns[2: -1]).to_pandas()
-            label = np.array(df["label"])
+            data = df.select(names).to_pandas()
+            label = np.array(df[LABEL_NAME])
 
             # Add training data
             ds.append(lgb.Dataset(data, label=label))
@@ -139,8 +144,12 @@ class LgbModel(AlphaModel):
         df: pl.DataFrame = dataset.fetch_infer(segment)
         df = df.sort(["datetime", "vt_symbol"])
 
-        # Convert to numpy array
-        data: np.ndarray = df.select(df.columns[2: -1]).to_numpy()
+        # Pin inference to the names the Booster itself recorded at fit
+        # time. _prepare_data feeds lgb.Dataset a pandas frame, so those
+        # names live inside every Booster ever trained here — including
+        # the ones already pickled in lab/*/model, which is why this needs
+        # no new persisted field.
+        data: np.ndarray = select_features(df, self.model.feature_name()).to_numpy()
 
         # Return prediction results
         result: np.ndarray = cast(np.ndarray, self.model.predict(data))

@@ -8,6 +8,7 @@ from vnpy.alpha import (
     Segment,
     logger
 )
+from vnpy.alpha.dataset import LABEL_NAME, feature_names, select_features
 
 
 class LassoModel(AlphaModel):
@@ -56,12 +57,15 @@ class LassoModel(AlphaModel):
         df_train = df_train.unique(subset=["datetime", "vt_symbol"])
         df_train = df_train.sort(["datetime", "vt_symbol"])
 
-        # Extract feature names
-        self.feature_names = df_train.columns[2:-1]
+        # Extract feature names by name, not by position — the old
+        # df.columns[2:-1] handed `label` to the model as its own strongest
+        # input the moment anything sat after it, and detail() then printed
+        # that coefficient as if it were a factor. See dataset/template.py.
+        self.feature_names = feature_names(df_train)
 
         # Convert to numpy arrays
         X: np.ndarray = df_train.select(self.feature_names).to_numpy()
-        y: np.ndarray = np.array(df_train["label"])
+        y: np.ndarray = np.array(df_train[LABEL_NAME])
 
         # Create and train the model
         self.model = Lasso(
@@ -102,8 +106,10 @@ class LassoModel(AlphaModel):
         df: pl.DataFrame = dataset.fetch_infer(segment)
         df = df.sort(["datetime", "vt_symbol"])
 
-        # Convert to numpy array
-        data: np.ndarray = df.select(df.columns[2: -1]).to_numpy()
+        # fit() already recorded the exact column names; reuse them instead
+        # of slicing the inference frame independently, so training and
+        # inference cannot drift apart column by column.
+        data: np.ndarray = select_features(df, self.feature_names).to_numpy()
 
         # Return prediction results
         result: np.ndarray = self.model.predict(data)

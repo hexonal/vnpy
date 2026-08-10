@@ -20,6 +20,84 @@ from .utility import (
 )
 
 
+# The label column is identified by NAME, never by position. prepare_data()
+# below sorts it to the last column, and lgb/lasso/mlp all used to read that
+# convention back off as `df.columns[2:-1]` — a positional slice that nothing
+# guards. add_processor() accepts an arbitrary Callable[[pl.DataFrame], ...],
+# so a single processor that leaves one column behind after `label` (a
+# liquidity flag, a scratch column it forgot to drop) turns the slice into
+# [f1..fN, label]: fit hands `label` in as an input feature AND as y, predict
+# slices identically, the column COUNT still matches — so LightGBM, sklearn
+# and torch all accept it without a word.
+#
+# Measured on the real hk_bluechip_10 daily panel (10 HK names, 6 features,
+# one appended column): `label` took 99.9965% of LightGBM's total gain, TEST
+# corr(signal, label) went 0.004942 -> 0.999952, and Lasso put coefficient
+# 0.99964 on `label` with exactly 0.0 on all six real features. The backtest
+# reads as a money printer and live trading reproduces none of it.
+#
+# The counter-case is worth recording too, because it explains why this never
+# blew up in-tree: all eleven shipped processors keep `label` last (verified),
+# and Alpha158/Alpha101 both call set_label(), so the positional slice happens
+# to be correct for every shipped pipeline. The invariant is real; what was
+# missing is anything that enforces it.
+LABEL_NAME: str = "label"
+
+KEY_NAMES: tuple[str, ...] = ("datetime", "vt_symbol")
+
+
+def feature_names(df: pl.DataFrame) -> list[str]:
+    """
+    List the training feature columns of a prepared frame by name.
+
+    Everything that is neither an index key nor the label is a feature, so
+    a column appearing after `label` is now just one more feature rather
+    than a silent one-position shift of the whole slice.
+
+    A frame with no `label` column refuses instead of donating its last
+    feature to the label's role. Refusing is the cheap outcome: the
+    positional version of this on a label-less frame either dropped a real
+    feature and then failed further downstream with a shape error whose
+    text says nothing about the missing label, or — when the counts lined
+    up — trained on the wrong columns.
+    """
+    if LABEL_NAME not in df.columns:
+        raise ValueError(
+            f"数据集缺少 {LABEL_NAME} 列，无法区分特征与标签；"
+            f"请先调用 set_label() 再 prepare_data()，收到的列为 {df.columns}"
+        )
+
+    return [name for name in df.columns if name not in KEY_NAMES and name != LABEL_NAME]
+
+
+def select_features(df: pl.DataFrame, names: list[str]) -> pl.DataFrame:
+    """
+    Select inference features by the names recorded at fit time.
+
+    Inference deliberately does NOT re-derive the feature list from the
+    frame: the point is to pin prediction to the exact columns, in the
+    exact order, the model was trained on. It also means an inference
+    frame legitimately carrying no label — the live case, where the
+    forward-looking label cannot exist yet — works instead of losing its
+    last feature.
+    """
+    missing: list[str] = [name for name in names if name not in df.columns]
+    if missing:
+        # Alpha158 makes a full miss 158 names long, which scrolls the
+        # actual point off the screen — the first few plus the count say
+        # the same thing and stay readable in a log panel.
+        shown: str = ", ".join(missing[:8])
+        if len(missing) > 8:
+            shown += f", ...(共 {len(missing)} 列)"
+
+        raise ValueError(
+            f"推理数据缺少训练时使用的特征列：{shown}；"
+            f"推理数据实际有 {df.width} 列，模型训练时用了 {len(names)} 列"
+        )
+
+    return df.select(names)
+
+
 class AlphaDataset:
     """Alpha dataset template class"""
 
