@@ -1122,9 +1122,191 @@ Alpha158 **158 / 158 逐位相同**。表格里把它并进 v2 行是因为**从
 分** —— 没有任何盖 v1 戳的产物存在过（查过全工作区），所以「v2 的 Alpha101 口径」
 指的就是这四条全部落地之后的口径，不存在一个只含前三条的中间态需要被区分。
 
+## 投研子系统的三条缺陷 —— 本轮的规矩是「先复现，再改」
+
+这一轮与前几轮不同的地方在方法而不在结论：**每一条都必须先写探针把它真的跑出来，
+复现不了就当场划掉，不许「读代码推断它应该会出错」，也不许改条件去凑一个能出错的
+场景**（那是造缺陷不是复现缺陷）。五条候选里有一条因此被降级（成分股台账的幸存者
+偏差，实测已实现偏差为 **0**），一条被判定不属于本仓（见下节）。
+
+### 1. `alpha/logger.py` — 导入研究子系统不再删掉交易日志的 sink
+
+**上游原行为**：`logger.remove()` 裸调（`5247ac45`，2025-03-26 至今一字未改）。
+loguru 的 handler 表是**进程级全局**的，这一句删的是【全部】handler，而它自己上面
+那行注释写的是 `# Remove default output` —— **意图只是 loguru 的默认 handler 0，
+调用写宽了**。`vnpy/trader/logger.py:40` 那句同理。
+
+**实测的失效**（探针在 sandbox 的 `.vntrader` 里跑，真实 `~/.vntrader/log` 未污染）：
+起一个真的 `MainEngine`、`write_log` 一条 marker、去磁盘上找 —— marker 上了 stdout，
+当天日志文件 **0 字节**。不抛异常、`LogEngine` 照常转发每个 `EVENT_LOG`、GUI 日志
+面板照常滚动。**一整个交易时段的落盘记录就这么没了。**
+
+**中招的是三个入口里的两个，而且那两行都不提 `vnpy.alpha`**：`run.py:35` 装上 →
+`run.py:40` 删掉；`run_gui.py:48` 装上 → `run_gui.py:50` 删掉。链路是
+`vnpy_alphakit.rules` → `vnpy_alphakit/__init__.py:10 from .bridge` →
+`bridge.py:42 from vnpy.alpha import ...`。也就是 **LLM Agent 下单入口与 Fluent
+交易终端**。`run_live_alpha.py` 幸存纯属它把 `vnpy.alpha.lab` 写在 `MainEngine`
+前面。顺带被翻掉三件事：电平门限 20（`SETTINGS["log.level"]`=INFO）→ 10（loguru 的
+DEBUG 默认）；`colorize` 自动探测的 False → 强制 True（重定向输出里真的出现
+`\x1b[32m`）；`{"log.console": false}` 下配置被**精确反转** —— 要「只写文件」的人
+拿到「只打屏幕」。
+
+**为什么不是删掉那一行了事**（本条唯一需要论证的决定）：alpha 的 sink 是给
+「notebook 里只 import 研究子系统」用的便利默认值。光删 `remove()`，它会叠在
+trader 的 stdout sink 之上，GUI 进程每行日志打两遍。所以改法是**两处都收窄**：按 id
+丢掉 loguru 自己的默认 handler（`logger.remove(0)` + `except ValueError`），然后
+**只在表为空时**才添自己的 sink。**反向顺序刻意不动** —— alpha 先、trader 后时
+trader 那句宽的 remove 会扫掉我们的 sink 留下它自己的两个，那是对的（trader 的
+format 带 level 与 gateway、文件 sink 才是要紧的那个）。
+
+**用私有属性 `logger._core.handlers` 的代价**：loguru 没有公开 API 能回答「有人配过
+我吗」，`logger.remove(0)` 也答不了（`ValueError` 只说默认 handler 没了，不说有没有
+别的顶上）。外面包了 `except AttributeError` 退化成「上游行为减去清场」—— 多一行
+控制台重复是看得见的烦人，交易日志文件消失不是。
+
+**测试为什么必须开子进程**：缺陷全在 module import 的副作用里，同一解释器里第二次
+import 是 no-op，不开子进程每条断言都会**无条件变绿**。
+
+### 2. `dataset/template.py` + 三个模型 — label 按名字找，不按位置切
+
+`lgb_model.py` / `lasso_model.py` / `mlp_model.py` 一共 6 处把特征矩阵写成
+`df.select(df.columns[2: -1])`，等于把「`prepare_data()` 会把 label 排到最后一列」
+这条约定硬编码成了切片下标。
+
+**约定本身是真的** —— 实测 11 个 shipped processor 逐个跑过，label 全部仍在最后
+一列；`add_feature(result=...)` 在 label 之后 join 也会被 `prepare_data` 的重排救
+回；Alpha158 / Alpha101 又都自己 `set_label`。**所以上游自带的任何管线都踩不到，
+缺的是守护它的东西**：`add_processor` 收的是任意 `Callable[[pl.DataFrame], ...]`，
+没有契约也没有校验。
+
+只要有一个调用方写的处理器在 label 之后留下一列（顺手打的流动性标记、忘了 drop 的
+中间列），切片就变成 `[f1..fN, label]`：`fit` 把 label 同时当 X 和 y，`predict` 照
+同样的切法喂，**列数前后自洽，所以 LightGBM / sklearn / torch 一个都不会吭声**。
+在 `lab/hk_bluechip_10` 真日线上实测（10 只 / 6 特征 / 多出一列）：label 独占
+LightGBM 总 gain 的 **99.9965%**，TEST corr(signal, label) 从 **0.004942 变
+0.999952**，干净信号与被污染信号的相关系数只有 0.004657；Lasso 给 label 的系数是
+**0.99964**，六个真因子系数**全部恰好为 0** —— 模型退化成恒等映射 y=y，回测读数
+是一台印钞机，实盘一根 bar 都对不上。
+
+**注意题面那条更直觉的猜想是【错的】**：「没有 set_label → 最后一个特征被静默丢掉」
+实测三条路径全部大声报错（`ColumnNotFoundError` / LightGBM 的 feature count
+mismatch）。**静默不来自列数错，只来自列数对、身份错。**
+
+改法是加一条按【名字】的共同判据 `feature_names()` / `select_features()`（放在
+`dataset/template.py`，因为 label 这个概念归 `AlphaDataset` 所有）。推理侧刻意**不**
+重新推导名单，一律用训练时记下的名字取列 —— 这样 `predict` 反而能接受合法地没有
+label 的实盘帧（前瞻标签在最新一根 bar 上不可能存在），而旧写法在那种帧上会丢掉
+最后一个特征、再以一句只字不提 label 的 shape 错误挂掉。
+
+**不需要重训任何存量产物。** LgbModel 的名字直接读 Booster 自己记下的
+`feature_name()`（`_prepare_data` 传的是 pandas 帧，所以每个已落盘的 Booster 里都
+有），Lasso / MLP 的 `self.feature_names` 本来就在 fit 时存了。实测：加载上一次
+`run_example.py` 落盘的 dataset.pkl + model.pkl（158 特征 Booster、161 列
+infer_df）重跑 predict，1340 行信号与当时保存的 signal parquet **逐值相同、最大
+偏差恰为 0.0**。
+
+### 3. 四份 notebook 传的 `hold_thresh` 是上游的哑弹，本仓把它变成了响弹
+
+`EquityDemoStrategy` 的参数名从上游起就叫 `min_days`，`hold_thresh` 是上游 notebook
+从 qlib 抄来的错名。而上游 `AlphaStrategy.__init__` 写的是
+`if hasattr(self, k): setattr(...)` —— 未知键静默丢弃。
+
+**它之所以活到今天，是因为 `min_days` 的类默认恰好也是 3**：想设的值与默认值撞在
+一起，「配置没生效」与「生效了」跑出来的结果**逐位相同**，没有任何观测能把两者
+分开。语义 v1 那轮把那个循环换成未知键直接 raise（`template.py:43-49`）—— 那是对
+的，但它同时把四份随包发布的 notebook 打断在 `engine.add_strategy(...)`。
+
+实测：只换数据坐标（10 处，逻辑一行不动）指向 `hk_bluechip_10`，lgb 一路跑到
+**cell 33** 才死在这里；改名之后三份从头跑到 cell 34 全过，lgb 出真回测（134 个
+交易日、**338 笔成交**）。顺带把 `mlp_model.py` 的 `input_size : int, default 360`
+改掉 —— 那是 qlib Alpha360 的遗留，而签名里它一直是**必填位置参数**。
+
+**一条不是 vnpy 的坑，但会咬人**：同一进程里先 `import lightgbm` 再用 torch，本机
+必挂 —— 一次死锁在 `__kmp_join_barrier`（`sample` 抓到栈，10 分钟零进展），一次段
+错误退出码 139。两份 libomp。一份 notebook 一个模型碰不到；**把多份塞进同一个
+Jupyter 内核依次跑就会碰到**。
+
+### 验证
+
+```bash
+cd vnpy && MPLBACKEND=Agg ../vnpy/.venv/bin/python -m pytest tests -q   # 205 -> 229 passed
+```
+
+新增三份用例共 24 例（`test_logger_sink_isolation.py` 9 /
+`test_model_label_column.py` 9 / `test_notebook_strategy_settings.py` 6）。
+`ruff check .` 全绿；`mypy vnpy` 的 2 个错误与改动前**逐字相同**（`qt.py:39`
+windll、`chart/item.py:122` unused-ignore，都在未触碰的文件里）。
+
+变异验证三轮：① `logger.py` 退回上游原样 → 9 例里 7 例红（诚实说法是 **6 例回归 +
+1 例弱证据** —— 有一条红在 `AttributeError: 没有 _configure_default_sink`，那是找不
+到助手而不是抓到缺陷；另 2 例绿是**故意的不变量锁定**）；② **只删 `remove()`、不做
+占用检查** → 4 例红，那正是「上游为什么 remove」这个问题必须被回答的地方；③
+`feature_names` 的返回改回 `list(df.columns[2:-1])` → 2 例红。
+
+## 明确决定【不放进本仓】：walk-forward 的 purge / embargo 与逐日 rank IC
+
+落在 `vnpy_alphakit/folds.py`（543 行）而不是 `vnpy/alpha/`，本仓这一条**一行未改**，
+记在这里是因为它是「加能力」里唯一一条**判断落在仓外**的。
+
+**缺陷本身是真的。** `AlphaDataset` 把三段日期原样交给 `query_by_time`
+（`dataset/template.py:274`），段与段**首尾相接**，而 Alpha158 / Alpha101 的标签是
+`ts_delay(close, -3) / ts_delay(close, -1) - 1` —— 跨 3 天。实测
+`lab/hk_bluechip_10`：train 收在 2025-06-30，把 artifact 的 `raw_df.label` 与手算
+`close[2025-07-04] / close[2025-07-02] - 1` 并排比，**10/10 只票逐位相同（8 位小数），
+两个价格都在 valid 段**；train 4750 行里 30 行、valid 1260 行里 30 行如此。
+
+**不放进本仓的理由**有两条，都是结构性的。其一，判官用的 `newey_west_se` 在
+`vnpy_alphakit/prereg.py`，而依赖 DAG 单向 —— 内核不能 import 卫星，放进来就得
+**复制一份必须与判官逐位一致的估计量**，那正是 `prereg.py` 整段散文要否掉的东西。
+其二，`data_periods` 是公开 dict，purge 不必发生在 `fetch_learn` 内部（四种切法的
+复现全靠改这个 dict 完成，生产代码零改动）。**代价是**：上游若把这条能力做进
+`AlphaDataset`，我们这边会与它重叠，届时 purge 算术该搬回内核。
+
+⚠️ **不要把「泄漏幅度」记成 +0.0493。** 那是单切分上「无 purge +0.0331」与
+「purge=3 +0.0824」的差，**方向还是反的** —— 删掉 30 行泄漏样本不该【提高】样本外
+读数。做了 30 个安慰剂（删 train 段任意互不重叠的 3 天）：零分布均值 +0.0632、
+sd 0.0266、跨度 +0.0080~+0.1151，**真 purge 落在 21/30 分位，单侧经验 p = 0.300**。
+LgbModel 的 `seed` 在此完全不起作用（10 个种子逐位相同，sd 0.0000 —— `params` 里
+没有 bagging / feature_fraction）。传导路径是**早停**：`best_iteration` 在这些扰动
+下取遍 1..30。所以正确的记法是：**泄漏是结构性事实，幅度在这个面板上不可测，因为
+单切分读数自身的分辨率（±0.027）比要争的效应还大** —— 这也是为什么只补 purge 而
+继续读单切分等于没做。
+
 ## 已知没做的事
 
 本仓不留待办标记 —— 以下是明确决定「现在不做」的条目，连同代价。
+
+**`processor.py` 里同款位置切片还有 7 处**（`columns[2:-1]` 5 处、`columns[2:]`
+2 处）。实测无 label 的帧过 `process_robust_zscore_norm`，最后一个特征 `ma_20`
+被**静默跳过、不归一、不报错**；另有一条同源的：特征若恰好叫 `mean` / `std` /
+`mad`，`process_cs_norm` 的临时列同名，先覆盖再 drop，**整列特征被静默删掉**
+（实测 `[datetime, vt_symbol, kmid, mean, label]` → `[datetime, vt_symbol, kmid,
+label]`）。**不修的理由**是它们与上面第 2 条同源但触发路径不同，混在一笔里会让
+变异验证说不清归属。**代价是**：Alpha158 / Alpha101 恰好没有这三个列名，所以今天
+不触发 —— 换一套特征集就触发，而且不响。
+
+**`vnpy/trader/logger.py:40` 那句宽的 `logger.remove()` 原样保留。** 它对称地会
+扫掉任何在它之前装的 sink。**不修的理由**：今天不构成故障（没有生产代码在 trader
+之前配 loguru，而「alpha 先、trader 后」正是靠它得到正确结果），而收窄它会立刻换来
+双控制台输出 —— 要一起修就得把 trader 的 stdout sink 也做成条件式，那是另一笔改动、
+另一组验证数字。
+
+**`BacktestingEngine.show_performance` 的基准是按【位置】拼进 daily_df 的**
+（`backtesting.py:463-479`），而 `load_bar_data` 缺文件时只 `logger.error` 返回 `[]`。
+长度不等时报的 `ShapeError: unable to add a column of length 0 to a DataFrame of
+height 134` **一个字不提基准缺失**；长度相等而交易日不同时**静默错位**。
+**不修的理由**：它在本轮射程外，且修法牵涉 daily_df 的拼装口径。**代价是**：任何
+带 benchmark 的 `show_performance` 读数，在基准与策略交易日不一致时是错的且不报。
+
+**`lab.py:302` `load_component_data` 的裸 `@lru_cache` 挂在实例方法上** —— 键含
+`self` 而 `save_component_data` 不失效。实测同一进程「读 → 改台账 → 再读」拿到旧
+名单，只有换 `AlphaLab` 实例才看得到新的；而 `run_example` 正是「`define_basket`
+写完立刻读 filters」这个顺序。同源第二条：`lab.py:290` 的 `save_component_data` 用
+`db.update(...)` 是**合并而非替换** —— 改了区间再跑一次 `define_basket`，旧快照原地
+留下，台账变成两代混合（实测三次写入后 shelve 里是 3 个键）。**不修的理由**：
+`vnpy_alphakit` 侧的 `load_component_filters_strict` 已经用 `cache_clear()` 把第一
+条对本链路的影响挡住了 —— **挡住不等于修好**，这句要留着。**代价是**：任何直接用
+`AlphaLab` 而不走那个包装的调用方，仍然会读到进程内的陈旧台账。
 
 ✅ **停牌日 NaN 被比较运算判出方向 —— 已在「语义 v2」那一节清掉。** 上一版这里
 写的「`cnt*` 会开始系统性高估上涨天数」**是错的描述**，更正见那一节：一次停牌
