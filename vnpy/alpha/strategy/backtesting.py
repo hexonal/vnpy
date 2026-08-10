@@ -812,8 +812,57 @@ class BacktestingEngine:
         return list(self.daily_results.values())
 
     def get_cash_available(self) -> float:
-        """Get current available cash"""
-        return self.cash
+        """Get current available cash, floored at zero
+
+        Callers spend this number as a budget rather than reading it as an
+        accounting balance, and a negative budget does not mean "buy nothing"
+        anywhere downstream — it means "buy a negative amount".
+        """
+        # The chain that made the floor necessary, measured end to end on
+        # lab/hk_bluechip_10 (10 HK names, 2026-01-02..2026-07-22, capital
+        # 1_000_000, top_k=3 n_drop=1 min_days=3, slippage 5bp):
+        #
+        # `equity_demo_strategy.on_bars` splits this value across the buy list
+        # (`buy_value = cash * cash_ratio / len(buy_symbols)`) and hands the
+        # quotient to `round_to`, which is plain Decimal rounding with no sign
+        # opinion — measured `round_to(-123.952491, 100) = -100.0`. That goes
+        # into `set_target`, and `AlphaStrategy.execute_trading` reads
+        # `diff = target - pos`; with `pos == 0` the `diff < 0` branch takes
+        # `short_volume = abs(diff)` and calls `self.short()`. A **long-only**
+        # demo strategy opens a short leg, with no exception, no log line and
+        # no rejected order. Measured: cash negative on 24 bars, bottom
+        # -21526.24, one negative target (9988.SEHK, -100 on 2026-02-05), one
+        # SHORT/OPEN fill, one -100 share book later closed by `cover`.
+        #
+        # The residue outlives the short position. `on_trade` pops
+        # `holding_days` only on `Direction.SHORT`, so the `cover` that
+        # flattens the short leaves the counter standing, and `on_bars` had
+        # been ticking it up all along because `if pos` is true for -100.
+        # Measured: frozen at 3 across 23 flat bars, so the next genuine entry
+        # (filled 2026-03-19) was already past `min_days` on its first day and
+        # was sold on 2026-03-20 — a 1-bar hold under `min_days=3`. With the
+        # floor, no holding period in that run comes in under 3 bars.
+        #
+        # This treats the symptom and not the books, deliberately. `self.cash`
+        # still goes negative: `cross_order` deducts unconditionally and this
+        # line does not touch it — measured 38 negative-cash bars with the
+        # floor against 24 without, because a floored budget buys more. And
+        # since `AlphaStrategy.get_portfolio_value()` is `get_cash_available()
+        # + get_holding_value()`, the floor makes the reported portfolio value
+        # **overstate** an overdrawn account instead of understating it. That
+        # is fail-open, and it is the lesser of the two: the alternative is a
+        # strategy sizing positions off a negative number. The root cause is a
+        # leaf-layer one — budget from the price the fill will actually happen
+        # at, then floor the share count to a whole board lot, so the budget is
+        # never overrun to begin with — and that is a change to the strategy,
+        # not to this engine.
+        #
+        # `vnpy_alphakit/live.py:1632` has been
+        # `max(lookup.equity - self.get_holding_value(), 0.0)` all along: the
+        # live path had the guard and the backtest did not. While the two
+        # disagreed on what "available cash" means, a backtest reading was not
+        # transferable to the account it was supposed to describe.
+        return max(self.cash, 0.0)
 
     def get_holding_value(self) -> float:
         """Get current holding market value"""
